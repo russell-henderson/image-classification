@@ -1,0 +1,36 @@
+{
+  "_comment": "Image Classification Desktop App Configuration Template",
+  "_instructions": "Copy this file to src/config/settings.json and configure your settings",
+  
+  "providers": {
+    "ollama": {
+      "enabled": true,
+      "base_url": "http://localhost:11434",
+      "model": "llava:latest",
+      "timeout_seconds": 120
+    }
+  },
+  "classification": {
+    "primary_provider": "ollama"
+  },
+  "batch_size": 10,
+  "thumbnail_size": 256,
+  "cache_duration": 86400,
+  "database_path": "image_metadata.db",
+  "thumbnail_cache_dir": "thumbnails",
+  "max_image_size": 2048,
+  "supported_formats": [".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".webp"],
+  "ui_theme": "dark",
+  "grid_columns": 4,
+  "rate_limit_delay": 1.0,
+  
+  "_advanced_settings": {
+    "_comment": "Advanced settings - modify with caution",
+    "log_level": "INFO",
+    "max_concurrent_requests": 5,
+    "image_quality": 85,
+    "thumbnail_cache_size": 100,
+    "api_timeout": 30,
+    "retry_attempts": 3
+  }
+}

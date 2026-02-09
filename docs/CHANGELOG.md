@@ -1,0 +1,42 @@
+# Changelog
+
+## 2026-02-08
+
+- Fixed thumbnail size slider to regenerate thumbnails, debounce updates, and reflow grid on resize.
+- Increased thumbnail size slider maximum to better fill available space.
+- Restored full thumbnail size range and raised slider max to 600.
+- Increased left pane width defaults to reduce gallery empty space.
+- Reverted auto-hide metadata panel behavior.
+- Forced canvas inner frame width to match canvas for proper grid fill.
+- Updated grid width calculation to use settled canvas size.
+- Centered grid rows by applying a left margin to the first column.
+- Set thumbnail slider max to 500 and cap grid at 3 columns.
+- Adjusted effective thumbnail size to ensure 3 columns fit at max.
+- Expanded `.gitignore` to cover Cursor and common cache files.
+- Fixed indentation in `src/main.py` `_setup_ui` and `_create_main_layout` to resolve a syntax error.
+- Added pytest configuration (`pytest.ini`) to avoid unintended collection of `test_setup.py`.
+- Added unit tests for `ImageHandler` and `DatabaseManager` (`unit_image_handler.py`, `unit_database.py`).
+- Added GitHub Actions workflow to run pytest on push and pull requests.
+- Updated `README.md` and `TECH.md` to note CI test enforcement.
+- Serialized SQLite datetime values to avoid Python 3.12+ adapter warnings.
+- Fixed cache cleanup cutoff calculation to avoid month boundary errors.
+- Removed `start_app.py` and `run_app.bat`, and updated docs/scripts referencing them.
+- Fixed README/AUDIT/install.bat references after entrypoint removal.
+- Reorganized docs/tests out of repo root.
+- Deleted CSV snapshot files (`image-classification_data_structure.csv` and `image-classification_data_dependencies.csv`).
+- Added classifier unit tests (`tests/unit_classifier.py`) for local flow and cache logic.
+- Added a mocked OpenAI classification test.
+- Added invalid JSON OpenAI response fallback test.
+- Added OpenAI setup documentation in `docs/TECH.md` and linked from `README.md`.
+- Replaced OpenAI classifier flow with Ollama LLaVA wiring and updated tests/docs.
+- Removed OpenAI dependency/config references and updated docs/tests for Ollama.
+- Removed OpenAI blocks from settings and config templates.
+- Removed OpenAI from `requirements.txt`.
+- Wired the MetadataPanel “Classify Image” button to use the engine in a background thread.
+- Added keyword/tag extraction from Ollama descriptions.
+- Added structured Ollama prompt parsing and metadata UI population.
+- Added structured DESCRIPTION field, stored raw AI output, and surfaced AI panel metadata.
+- Tightened DESCRIPTION prompt and added retry repair for weak descriptions.
+- Added database_path to settings.json to avoid startup warnings.
+- Merged default config values to prevent missing key crashes (thumbnail_size).
+- Switched to slot-based prompt with fallback to old format.

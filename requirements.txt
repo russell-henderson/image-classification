@@ -1,0 +1,25 @@
+# Image Classification Desktop App Requirements
+
+# GUI Framework
+customtkinter>=5.2.0
+# tkinter is built-in with Python
+
+# Image Processing
+Pillow>=10.0.0
+opencv-python>=4.8.0
+exifread>=3.0.0
+
+# ML/API Integration
+requests>=2.31.0
+
+# Data Management
+pandas>=2.0.0
+
+# Additional utilities
+pathlib2>=2.3.7; python_version<"3.4"
+
+# Development dependencies (optional)
+pytest>=7.0.0
+black>=23.0.0
+flake8>=6.0.0
+mypy>=1.0.0
