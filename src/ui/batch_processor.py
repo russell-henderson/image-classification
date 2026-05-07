@@ -19,6 +19,7 @@ except ImportError:
 
 from core.classifier import ClassificationEngine
 from core.database import ImageMetadata
+from core.image_handler import ImageHandler
 
 
 class BatchProcessor:
@@ -35,6 +36,10 @@ class BatchProcessor:
         self.current_batch = []
         self.processed_count = 0
         self.error_count = 0
+        self.total_to_process = 0
+        self.current_image_path: Optional[str] = None
+        self.current_stage = "idle"
+        self.image_handler = ImageHandler(thumbnail_size=120)
         
         self._create_dialog()
     
@@ -42,7 +47,8 @@ class BatchProcessor:
         """Create the batch processing dialog."""
         self.dialog = tk.Toplevel(self.parent)
         self.dialog.title("Batch Image Processing")
-        self.dialog.geometry("600x500")
+        self.dialog.geometry("820x720")
+        self.dialog.minsize(760, 640)
         self.dialog.resizable(True, True)
         self.dialog.transient(self.parent)
         self.dialog.grab_set()
@@ -116,31 +122,89 @@ class BatchProcessor:
         tk.Checkbutton(options_frame, text="Skip already classified images",
                       variable=self.skip_classified).grid(row=2, column=0, columnspan=2, sticky="w", pady=2)
         
-        # Batch size
-        tk.Label(options_frame, text="Batch size:").grid(row=3, column=0, sticky="w", pady=5)
-        self.batch_size = tk.IntVar(value=10)
-        batch_spinbox = tk.Spinbox(options_frame, from_=1, to=50, textvariable=self.batch_size, width=10)
-        batch_spinbox.grid(row=3, column=1, sticky="w", padx=5, pady=5)
-        
-        # Delay between API calls
-        tk.Label(options_frame, text="API delay (seconds):").grid(row=4, column=0, sticky="w", pady=5)
+        # Delay between images
+        tk.Label(options_frame, text="Delay between images (seconds):").grid(row=3, column=0, sticky="w", pady=5)
         self.api_delay = tk.DoubleVar(value=1.0)
         delay_spinbox = tk.Spinbox(options_frame, from_=0.1, to=10.0, increment=0.1, 
                                   textvariable=self.api_delay, width=10)
-        delay_spinbox.grid(row=4, column=1, sticky="w", padx=5, pady=5)
+        delay_spinbox.grid(row=3, column=1, sticky="w", padx=5, pady=5)
     
     def _create_progress_section(self):
         """Create progress monitoring section."""
         progress_frame = ttk.LabelFrame(self.dialog, text="Progress", padding=10)
         progress_frame.grid(row=2, column=0, sticky="nsew", padx=10, pady=5)
         progress_frame.grid_columnconfigure(0, weight=1)
-        progress_frame.grid_rowconfigure(1, weight=1)
-        
+        progress_frame.grid_rowconfigure(2, weight=1)
+
         # Progress bar and status
         self.progress_var = tk.DoubleVar()
         self.progress_bar = ttk.Progressbar(progress_frame, variable=self.progress_var, 
                                            mode='determinate', length=400)
-        self.progress_bar.grid(row=0, column=0, sticky="ew", pady=5)
+        self.progress_bar.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+
+        current_frame = ttk.LabelFrame(progress_frame, text="Current Image", padding=10)
+        current_frame.grid(row=1, column=0, sticky="ew", pady=(0, 10))
+        current_frame.grid_columnconfigure(1, weight=1)
+        current_frame.grid_rowconfigure(0, weight=1)
+
+        preview_frame = tk.Frame(current_frame, width=180, height=180, bg="white", relief=tk.SUNKEN, borderwidth=1)
+        preview_frame.grid(row=0, column=0, sticky="nw", padx=(0, 14))
+        preview_frame.grid_propagate(False)
+        preview_frame.grid_columnconfigure(0, weight=1)
+        preview_frame.grid_rowconfigure(0, weight=1)
+
+        self.preview_image_label = tk.Label(
+            preview_frame,
+            text="No image active",
+            bg="white",
+            fg="gray",
+            anchor="center",
+            justify=tk.CENTER,
+        )
+        self.preview_image_label.grid(row=0, column=0, sticky="nsew")
+
+        detail_frame = tk.Frame(current_frame)
+        detail_frame.grid(row=0, column=1, sticky="nsew")
+        detail_frame.grid_columnconfigure(0, weight=1)
+
+        self.current_file_label = tk.Label(
+            detail_frame,
+            text="Current image: none",
+            font=("Arial", 10, "bold"),
+            anchor="w",
+            justify=tk.LEFT,
+            wraplength=520,
+        )
+        self.current_file_label.grid(row=0, column=0, sticky="ew")
+
+        self.current_counter_label = tk.Label(
+            detail_frame,
+            text="Progress: 0 of 0",
+            anchor="w",
+            justify=tk.LEFT,
+            fg="#666666",
+        )
+        self.current_counter_label.grid(row=1, column=0, sticky="ew", pady=(6, 6))
+
+        self.current_stage_label = tk.Label(
+            detail_frame,
+            text="Stage: waiting",
+            anchor="w",
+            justify=tk.LEFT,
+            wraplength=520,
+            fg="#666666",
+        )
+        self.current_stage_label.grid(row=2, column=0, sticky="ew")
+
+        self.current_detail_label = tk.Label(
+            detail_frame,
+            text="Waiting for the first image.",
+            anchor="nw",
+            justify=tk.LEFT,
+            wraplength=520,
+            fg="#222222",
+        )
+        self.current_detail_label.grid(row=3, column=0, sticky="ew", pady=(8, 0))
         
         # Status text area
         self.status_text = tk.Text(progress_frame, height=15, wrap=tk.WORD, 
@@ -149,12 +213,12 @@ class BatchProcessor:
                                         command=self.status_text.yview)
         self.status_text.configure(yscrollcommand=status_scrollbar.set)
         
-        self.status_text.grid(row=1, column=0, sticky="nsew", pady=5)
-        status_scrollbar.grid(row=1, column=1, sticky="ns")
+        self.status_text.grid(row=2, column=0, sticky="nsew", pady=5)
+        status_scrollbar.grid(row=2, column=1, sticky="ns")
         
         # Statistics
         stats_frame = tk.Frame(progress_frame)
-        stats_frame.grid(row=2, column=0, sticky="ew", pady=5)
+        stats_frame.grid(row=3, column=0, columnspan=2, sticky="ew", pady=5)
         stats_frame.grid_columnconfigure((0, 1, 2), weight=1)
         
         self.processed_label = tk.Label(stats_frame, text="Processed: 0")
@@ -278,12 +342,15 @@ class BatchProcessor:
             return
         
         # Filter already classified images if requested
+        skipped_count = 0
         if self.skip_classified.get():
             filtered_list = []
             for img_path in image_list:
                 metadata = self.classifier.db_manager.get_image(img_path)
-                if not metadata or not metadata.classification or self.force_refresh.get():
+                if self.force_refresh.get() or not self.classifier.is_metadata_already_classified(metadata):
                     filtered_list.append(img_path)
+                else:
+                    skipped_count += 1
             image_list = filtered_list
         
         if not image_list:
@@ -296,13 +363,22 @@ class BatchProcessor:
         self.processed_count = 0
         self.error_count = 0
         self.is_processing = True
+        self.total_to_process = len(image_list)
+        self.current_image_path = None
+        self.current_stage = "idle"
         
         # Update UI
         self.start_btn.config(state=tk.DISABLED)
         self.stop_btn.config(state=tk.NORMAL)
         self.progress_var.set(0)
+        self._set_current_batch_preview(None, "Waiting for the first image.", "Current image: none")
+        self._update_stats()
         
         self._log_message(f"Starting batch processing of {len(image_list)} images...")
+        if skipped_count:
+            self._log_message(
+                f"Skipped {skipped_count} image(s) that already had classification metadata."
+            )
         
         # Start processing in background thread
         threading.Thread(target=self._process_batch, daemon=True).start()
@@ -322,44 +398,18 @@ class BatchProcessor:
             # Create new event loop for this thread
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
-            
-            batch_size = self.batch_size.get()
-            total_images = len(self.current_batch)
-            
-            # Process in batches
-            for i in range(0, total_images, batch_size):
-                if not self.is_processing:
-                    break
-                
-                batch = self.current_batch[i:i + batch_size]
-                
-                # Process this batch
-                try:
-                    results = loop.run_until_complete(
-                        self.classifier.batch_process_images(
-                            batch, 
-                            progress_callback=self._on_image_processed
-                        )
-                    )
-                    
-                    self.processed_count += len(results)
-                    
-                except Exception as e:
-                    self.logger.error(f"Error processing batch: {e}")
-                    self.error_count += len(batch)
-                    self.dialog.after(0, lambda: self._log_message(f"Batch error: {e}"))
-                
-                # Update progress
-                progress = (i + len(batch)) / total_images * 100
-                self.dialog.after(0, lambda p=progress: self.progress_var.set(p))
-                
-                # Delay between batches
-                if i + batch_size < total_images and self.is_processing:
-                    delay = self.api_delay.get()
-                    self.dialog.after(0, lambda: self._log_message(f"Waiting {delay}s before next batch..."))
-                    threading.Event().wait(delay)
-            
-            # Processing complete
+
+            loop.run_until_complete(
+                self.classifier.batch_process_images(
+                    self.current_batch,
+                    progress_callback=self._on_image_processed,
+                    force_refresh=self.force_refresh.get(),
+                    skip_existing=self.skip_classified.get(),
+                    delay_seconds=self.api_delay.get(),
+                    status_callback=self._on_batch_status,
+                )
+            )
+
             self.dialog.after(0, self._on_processing_complete)
             
         except Exception as e:
@@ -373,11 +423,76 @@ class BatchProcessor:
         """Handle individual image processing completion."""
         filename = Path(image_path).name
         message = f"Processed: {filename} ({current}/{total})"
+        self.processed_count = current
+        progress = (current / max(total, 1)) * 100
         
         # Update UI in main thread
         self.dialog.after(0, lambda: self._log_message(message))
-        self.dialog.after(0, lambda: self._update_stats())
-    
+        self.dialog.after(0, lambda p=progress: self.progress_var.set(p))
+        self.dialog.after(0, self._update_stats)
+
+    def _on_batch_status(self, current: int, total: int, image_path: str, stage: str, detail: str):
+        """Receive live status updates for the current image in batch mode."""
+        if not self.is_processing:
+            return
+        filename = Path(image_path).name
+        self.current_image_path = image_path
+        self.current_stage = stage
+        headline = f"Current image: {filename} ({current}/{total})"
+
+        self.dialog.after(
+            0,
+            lambda: self._set_current_batch_preview(
+                image_path,
+                detail,
+                headline,
+                current=current,
+                total=total,
+                stage=stage,
+            ),
+        )
+
+        if stage in {"received", "working", "completed", "failed"}:
+            self.dialog.after(
+                0,
+                lambda: self._log_message(f"[{current}/{total}] {filename}: {detail}"),
+            )
+
+    def _set_current_batch_preview(
+        self,
+        image_path: Optional[str],
+        detail: str,
+        headline: str,
+        current: int = 0,
+        total: int = 0,
+        stage: str = "idle",
+    ) -> None:
+        """Update the current image preview and stage text in the batch dialog."""
+        self.current_file_label.config(text=headline)
+        self.current_counter_label.config(text=f"Progress: {current} of {total}" if total else "Progress: 0 of 0")
+        self.current_stage_label.config(text=f"Stage: {stage}")
+        self.current_detail_label.config(text=detail)
+
+        if not image_path:
+            self.preview_image_label.config(image="", text="No image active")
+            self.preview_image_label.image = None
+            return
+
+        try:
+            thumbnail = self.image_handler.create_thumbnail(image_path, 120)
+            if thumbnail:
+                from PIL import ImageTk
+
+                tk_image = ImageTk.PhotoImage(thumbnail)
+                self.preview_image_label.config(image=tk_image, text="")
+                self.preview_image_label.image = tk_image
+                return
+        except Exception as e:
+            self.logger.error(f"Error updating batch preview for {image_path}: {e}")
+
+        self.preview_image_label.config(image="", text="Preview unavailable")
+        self.preview_image_label.image = None
+
     def _on_processing_complete(self):
         """Handle processing completion."""
         self.is_processing = False
@@ -385,7 +500,15 @@ class BatchProcessor:
         # Update UI
         self.start_btn.config(state=tk.NORMAL)
         self.stop_btn.config(state=tk.DISABLED)
-        self.progress_var.set(100)
+        self.progress_var.set(100 if self.total_to_process else 0)
+        self._set_current_batch_preview(
+            self.current_image_path,
+            "Batch processing finished.",
+            self.current_file_label.cget("text") if self.current_image_path else "Current image: none",
+            current=self.processed_count,
+            total=self.total_to_process,
+            stage="completed",
+        )
         
         # Final message
         success_count = self.processed_count - self.error_count
@@ -400,8 +523,8 @@ class BatchProcessor:
     
     def _update_stats(self):
         """Update statistics display."""
-        remaining = len(self.current_batch) - self.processed_count
-        
+        remaining = max(self.total_to_process - self.processed_count, 0)
+
         self.processed_label.config(text=f"Processed: {self.processed_count}")
         self.errors_label.config(text=f"Errors: {self.error_count}")
         self.remaining_label.config(text=f"Remaining: {remaining}")

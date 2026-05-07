@@ -27,6 +27,12 @@ from core.classifier import ClassificationEngine
 
 class MetadataPanel(tk.Frame):
     """Panel for viewing and editing image metadata."""
+
+    STATUS_IDLE = "idle"
+    STATUS_RECEIVED = "received"
+    STATUS_WORKING = "working"
+    STATUS_COMPLETED = "completed"
+    STATUS_FAILED = "failed"
     
     def __init__(self, parent, classifier: ClassificationEngine, db_manager: DatabaseManager,
                  on_metadata_change: Optional[Callable[[str, str, Any], None]] = None):
@@ -109,18 +115,125 @@ class MetadataPanel(tk.Frame):
         row = self._create_section_header(self.content_frame, "Preview", row)
         
         # Preview frame
-        preview_frame = tk.Frame(self.content_frame, relief=tk.SUNKEN, borderwidth=2, 
+        preview_frame = tk.Frame(self.content_frame, relief=tk.SUNKEN, borderwidth=2,
                                 height=200, bg="white")
         preview_frame.grid(row=row, column=0, sticky="ew", padx=5, pady=5)
         preview_frame.grid_propagate(False)
-        preview_frame.grid_columnconfigure(0, weight=1)
+        preview_frame.grid_columnconfigure(0, weight=0)
+        preview_frame.grid_columnconfigure(1, weight=1)
         preview_frame.grid_rowconfigure(0, weight=1)
-        
+
+        status_frame = tk.Frame(preview_frame, bg="white", width=170)
+        status_frame.grid(row=0, column=0, sticky="nsw", padx=(18, 8), pady=14)
+        status_frame.grid_propagate(False)
+        status_frame.grid_columnconfigure(0, weight=1)
+
+        tk.Label(
+            status_frame,
+            text="Classification Status",
+            font=("Arial", 9, "bold"),
+            bg="white",
+            anchor="w",
+        ).grid(row=0, column=0, sticky="ew", pady=(0, 8))
+
+        self.status_steps = {}
+        status_rows = [
+            ("received", "1. Command received"),
+            ("working", "2. Running LLaVA"),
+            ("completed", "3. Completed"),
+        ]
+        for idx, (key, label_text) in enumerate(status_rows, start=1):
+            row_frame = tk.Frame(status_frame, bg="white")
+            row_frame.grid(row=idx, column=0, sticky="ew", pady=5)
+            row_frame.grid_columnconfigure(1, weight=1)
+
+            indicator = tk.Label(
+                row_frame,
+                width=2,
+                height=1,
+                bg="#d9d9d9",
+                relief=tk.FLAT,
+            )
+            indicator.grid(row=0, column=0, sticky="w")
+
+            label = tk.Label(
+                row_frame,
+                text=label_text,
+                font=("Arial", 9),
+                bg="white",
+                fg="#666666",
+                anchor="w",
+            )
+            label.grid(row=0, column=1, sticky="ew", padx=(8, 0))
+            self.status_steps[key] = (indicator, label)
+
+        self.status_message_label = tk.Label(
+            status_frame,
+            text="Waiting for a classification request.",
+            font=("Arial", 8),
+            bg="white",
+            fg="#666666",
+            anchor="w",
+            justify=tk.LEFT,
+            wraplength=150,
+        )
+        self.status_message_label.grid(row=4, column=0, sticky="ew", pady=(10, 0))
+
         self.preview_label = tk.Label(preview_frame, text="No image selected", 
                                      bg="white", fg="gray")
-        self.preview_label.grid(row=0, column=0)
+        self.preview_label.grid(row=0, column=1)
+
+        self._set_classification_status(self.STATUS_IDLE)
         
         self.current_row = row + 1
+
+    def _set_classification_status(self, status: str, detail: str = "") -> None:
+        """Update the visible classification status steps in the preview area."""
+        palette = {
+            self.STATUS_IDLE: {
+                "received": "#d9d9d9",
+                "working": "#d9d9d9",
+                "completed": "#d9d9d9",
+                "message": detail or "Waiting for a classification request.",
+            },
+            self.STATUS_RECEIVED: {
+                "received": "#38b000",
+                "working": "#d9d9d9",
+                "completed": "#d9d9d9",
+                "message": detail or "Command received. Preparing the classification request.",
+            },
+            self.STATUS_WORKING: {
+                "received": "#38b000",
+                "working": "#f4b400",
+                "completed": "#d9d9d9",
+                "message": detail or "LLaVA is processing the image now.",
+            },
+            self.STATUS_COMPLETED: {
+                "received": "#38b000",
+                "working": "#38b000",
+                "completed": "#38b000",
+                "message": detail or "Classification completed successfully.",
+            },
+            self.STATUS_FAILED: {
+                "received": "#38b000",
+                "working": "#db4437",
+                "completed": "#db4437",
+                "message": detail or "Classification failed.",
+            },
+        }
+        active = palette.get(status, palette[self.STATUS_IDLE])
+
+        for key, (indicator, label) in self.status_steps.items():
+            indicator.config(bg=active.get(key, "#d9d9d9"))
+            label.config(
+                fg="#111111" if active.get(key, "#d9d9d9") != "#d9d9d9" else "#666666"
+            )
+
+        self.status_message_label.config(text=active["message"])
+
+    def _handle_classifier_status(self, stage: str, detail: str) -> None:
+        """Receive classifier progress updates from the worker thread."""
+        self.after(0, lambda: self._set_classification_status(stage, detail))
     
     def _create_basic_info_section(self):
         """Create basic information section."""
@@ -312,6 +425,11 @@ class MetadataPanel(tk.Frame):
             self._update_classification_display()
         finally:
             self._updating_ui = False
+
+        if metadata.classification:
+            self._set_classification_status(self.STATUS_COMPLETED)
+        else:
+            self._set_classification_status(self.STATUS_IDLE)
 
     def _populate_fields_from_metadata(self, metadata: ImageMetadata):
         """Populate tags/keywords/categories and technical info."""
@@ -600,6 +718,11 @@ class MetadataPanel(tk.Frame):
             messagebox.showwarning("No Path", "Selected image has no filepath.")
             return
 
+        self._set_classification_status(
+            self.STATUS_RECEIVED,
+            "Command received. Queuing this image for classification.",
+        )
+
         threading.Thread(
             target=self._classify_current_image_async,
             args=(image_path,),
@@ -613,11 +736,22 @@ class MetadataPanel(tk.Frame):
             asyncio.set_event_loop(loop)
 
             metadata = loop.run_until_complete(
-                self.classifier.process_image(image_path, force_refresh=True)
+                self.classifier.process_image(
+                    image_path,
+                    force_refresh=True,
+                    status_callback=self._handle_classifier_status,
+                )
             )
 
             self.after(0, lambda: self._on_classify_complete(image_path, metadata))
         except Exception as e:
+            self.after(
+                0,
+                lambda: self._set_classification_status(
+                    self.STATUS_FAILED,
+                    f"Classification failed: {e}",
+                ),
+            )
             self.after(0, lambda: messagebox.showerror("Classification Error", str(e)))
         finally:
             try:
@@ -630,7 +764,15 @@ class MetadataPanel(tk.Frame):
         if metadata:
             self.load_metadata(metadata)
             self._populate_fields_from_metadata(self.current_metadata)
+            self._set_classification_status(
+                self.STATUS_COMPLETED,
+                "Classification complete. Metadata fields have been updated.",
+            )
         else:
+            self._set_classification_status(
+                self.STATUS_FAILED,
+                "Classification failed before metadata could be updated.",
+            )
             messagebox.showerror("Classification Error", "Classification failed.")
     
     def _clear_classification(self):
@@ -639,6 +781,7 @@ class MetadataPanel(tk.Frame):
             self.on_metadata_change(self.current_metadata.file_path, 'classification', '')
             self.on_metadata_change(self.current_metadata.file_path, 'api_cached', False)
             self._update_classification_display()
+            self._set_classification_status(self.STATUS_IDLE)
     
     def _save_changes(self):
         """Save all changes."""

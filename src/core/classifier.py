@@ -22,12 +22,15 @@ from .image_handler import ImageHandler
 OLLAMA_SLOT_PROMPT = """
 Output EXACTLY these 7 lines. No extra text.
 
-SUBJECT: <main subject(s) in 3-10 words>
-SETTING: <where it is / environment in 6-14 words>
-COLORS: <2-5 color words, comma-separated>
-LIGHTING: <lighting in 3-10 words>
-MOOD: <mood in 2-8 words>
-STYLE: <art style in 2-10 words>
+Use only directly visible facts. Do not guess intent, identity, relationships,
+story, mood, or anything not plainly visible. If a field is unclear, write unclear.
+
+SUBJECT: <main visible subject(s) in 3-10 words>
+SETTING: <visible environment in 6-14 words>
+COLORS: <2-5 visible color words, comma-separated>
+LIGHTING: <visible lighting in 3-10 words>
+MOOD: <only if visually obvious, otherwise unclear>
+STYLE: <visible medium/style if apparent, otherwise unclear>
 TAGS: <6-10 comma-separated nouns, no colors>
 """.strip()
 
@@ -35,10 +38,28 @@ OLLAMA_OLD_PROMPT = """
 Output EXACTLY 5 lines. No extra text.
 
 CAPTION: <max 20 words>
-DESCRIPTION: <2-4 sentences. Include: setting, lighting, dominant colors (name 2-4), mood, style>
+DESCRIPTION: <2-4 sentences of visible facts only. Include: subject, setting, lighting, dominant colors. Do not guess intent, mood, identity, relationships, or story.>
 TAGS: <6-10 comma-separated nouns, no colors>
 KEYWORDS: <8-15 comma-separated, include style+environment+lighting, allow colors here>
 CATEGORIES: <1-3 comma-separated broad buckets>
+""".strip()
+
+OLLAMA_DESCRIPTION_REPAIR_PROMPT = """
+Write one detailed paragraph describing this image.
+
+Requirements:
+- 60 to 120 words
+- mention the main subject
+- mention the setting or environment
+- mention visible colors
+- mention lighting
+- mention only directly visible details
+- style or medium may be mentioned only if clearly apparent
+- do not infer intent, emotion, identity, profession, relationships, or story
+- if a detail is uncertain, omit it instead of guessing
+- do not use bullet points
+- do not include labels like SUBJECT:, DESCRIPTION:, or TAGS:
+- do not say "the image shows"
 """.strip()
 
 _STOP_WORDS = {
@@ -55,6 +76,24 @@ _COLOR_WORDS = {
 _CAMERA_WORDS = {
     "bokeh", "lens", "focal", "aperture", "iso", "shutter", "depth of field", "dof", "exposure"
 }
+
+_SPECULATIVE_PATTERNS = [
+    r"\blikely\b",
+    r"\bprobably\b",
+    r"\bmaybe\b",
+    r"\bperhaps\b",
+    r"\bpossibly\b",
+    r"\bmight be\b",
+    r"\bcould be\b",
+    r"\bseems to\b",
+    r"\bappears to\b",
+    r"\blooks like\b",
+    r"\bsuggests\b",
+    r"\bimplies\b",
+    r"\bas if\b",
+    r"\bready to\b",
+    r"\babout to\b",
+]
 
 
 def _split_csv_items(value: str) -> List[str]:
@@ -130,22 +169,31 @@ def build_description_from_slots(slots: Dict[str, object]) -> str:
     setting = slots.get("setting") or ""
     colors = slots.get("colors") or []
     lighting = slots.get("lighting") or ""
-    mood = slots.get("mood") or ""
-    style = slots.get("style") or ""
 
     if subject:
-        parts.append(f"Subject: {subject}.")
+        parts.append(f"The main visible subject is {subject}.")
     if setting:
-        parts.append(f"Setting: {setting}.")
+        parts.append(f"The setting appears as {setting}.")
     if colors:
-        parts.append(f"Colors: {', '.join(colors)}.")
+        parts.append(f"Visible colors include {', '.join(colors)}.")
     if lighting:
-        parts.append(f"Lighting: {lighting}.")
-    if mood:
-        parts.append(f"Mood: {mood}.")
-    if style:
-        parts.append(f"Style: {style}.")
+        parts.append(f"The lighting is {lighting}.")
     return " ".join(parts).strip()
+
+
+def description_has_speculation(description: str) -> bool:
+    text = (description or "").strip().lower()
+    if not text:
+        return False
+    return any(re.search(pattern, text) for pattern in _SPECULATIVE_PATTERNS)
+
+
+def description_needs_repair(description: str) -> bool:
+    text = (description or "").strip()
+    if not text:
+        return True
+    words = re.findall(r"\b\w+\b", text)
+    return len(words) < 30 or description_has_speculation(text)
 
 
 def parse_llava_structured(text: str) -> Dict[str, object]:
@@ -482,16 +530,177 @@ class ClassificationEngine:
             if len(keywords) >= max_keywords:
                 break
         return keywords
+
+    def _clean_text_list(self, items: List[str], max_items: int) -> List[str]:
+        """Normalize and deduplicate user-facing metadata lists."""
+        cleaned = []
+        seen = set()
+        for item in items or []:
+            value = (item or "").strip()
+            if not value:
+                continue
+            norm = value.lower()
+            if norm in seen:
+                continue
+            seen.add(norm)
+            cleaned.append(value)
+            if len(cleaned) >= max_items:
+                break
+        return cleaned
+
+    def _emit_status(
+        self,
+        status_callback: Optional[Callable[[str, str], None]],
+        stage: str,
+        detail: str,
+    ) -> None:
+        """Emit progress updates to the UI when a callback is provided."""
+        if status_callback:
+            try:
+                status_callback(stage, detail)
+            except Exception as e:
+                self.logger.debug(f"Status callback error: {e}")
+
+    def is_metadata_already_classified(self, metadata: Optional[ImageMetadata]) -> bool:
+        """Return True when an image already has meaningful classification data."""
+        if not metadata:
+            return False
+
+        if (metadata.description or "").strip():
+            return True
+        if metadata.tags:
+            return True
+        if metadata.keywords:
+            return True
+        if metadata.categories:
+            return True
+        if (metadata.classification or "").strip():
+            return True
+        return False
+
+    async def _repair_detailed_description(
+        self,
+        image_path: str,
+        existing_description: str = "",
+        status_callback: Optional[Callable[[str, str], None]] = None,
+    ) -> str:
+        """Ask Ollama for a richer paragraph when the structured pass is too thin."""
+        self._emit_status(
+            status_callback,
+            "working",
+            "Expanding the description into a fuller paragraph.",
+        )
+        prompt = OLLAMA_DESCRIPTION_REPAIR_PROMPT
+        if existing_description:
+            prompt += (
+                "\n\nExisting short description for context:\n"
+                f"{existing_description.strip()}"
+            )
+
+        result = await self.classify_image_ollama(
+            image_path,
+            custom_prompt=prompt,
+        )
+        if not result or "error" in result:
+            return existing_description
+
+        repaired = (result.get("raw") or "").strip()
+        if repaired:
+            return repaired
+        return existing_description
+
+    def _ensure_metadata_completeness(
+        self,
+        metadata: ImageMetadata,
+        image_path: str,
+        classification_result: Dict[str, Any],
+        status_callback: Optional[Callable[[str, str], None]] = None,
+    ) -> ImageMetadata:
+        """
+        Backfill missing fields so classification always leaves a complete
+        metadata record even when Ollama omits parts of the schema.
+        """
+        self._emit_status(
+            status_callback,
+            "working",
+            "Filling any missing metadata fields from local analysis.",
+        )
+        local_result = self.classify_image_local(image_path)
+        local_description = local_result.get("description", "")
+
+        if not metadata.description:
+            metadata.description = local_description
+
+        fallback_keywords = self._extract_keywords(
+            " ".join(
+                [
+                    metadata.description or "",
+                    local_result.get("scene", ""),
+                    local_result.get("mood", ""),
+                    local_result.get("quality", ""),
+                ]
+            ),
+            max_keywords=12,
+        )
+        metadata.keywords = self._clean_text_list(
+            list(metadata.keywords or []) + fallback_keywords,
+            12,
+        )
+
+        fallback_tags = self._extract_keywords(
+            " ".join(
+                [
+                    metadata.description or "",
+                    " ".join(metadata.keywords or []),
+                ]
+            ),
+            max_keywords=10,
+        )
+        metadata.tags = self._clean_text_list(
+            list(metadata.tags or []) + fallback_tags,
+            10,
+        )
+
+        fallback_categories = []
+        scene = local_result.get("scene", "")
+        if scene:
+            fallback_categories.append(scene)
+        if not fallback_categories:
+            fallback_categories.append("unclassified")
+        metadata.categories = self._clean_text_list(
+            list(metadata.categories or []) + fallback_categories,
+            3,
+        )
+
+        metadata.classification = json.dumps(classification_result)
+        metadata.api_cached = True
+        metadata.cache_date = datetime.now()
+        return metadata
     
-    async def process_image(self, image_path: str, force_refresh: bool = False) -> Optional[ImageMetadata]:
+    async def process_image(
+        self,
+        image_path: str,
+        force_refresh: bool = False,
+        status_callback: Optional[Callable[[str, str], None]] = None,
+    ) -> Optional[ImageMetadata]:
         """Process a single image with classification."""
         try:
+            self._emit_status(
+                status_callback,
+                "received",
+                "Command received. Checking cached results first.",
+            )
             # Check if image exists in database
             existing_metadata = self.db_manager.get_image(image_path)
             
             # Use cache if valid and not forcing refresh
             if existing_metadata and not force_refresh and self._is_cache_valid(existing_metadata):
                 self.logger.info(f"Using cached classification for {image_path}")
+                self._emit_status(
+                    status_callback,
+                    "completed",
+                    "Used cached classification. No new LLaVA request was needed.",
+                )
                 return existing_metadata
             
             # Create or update metadata
@@ -503,6 +712,11 @@ class ClassificationEngine:
                     return None
             
             # Try Ollama slot prompt first
+            self._emit_status(
+                status_callback,
+                "working",
+                "Sending the primary structured prompt to LLaVA.",
+            )
             classification_result = await self.classify_image_ollama(
                 image_path,
                 custom_prompt=OLLAMA_SLOT_PROMPT,
@@ -510,22 +724,37 @@ class ClassificationEngine:
 
             if not classification_result or "error" in classification_result:
                 self.logger.info(f"Using local classification for {image_path}")
+                self._emit_status(
+                    status_callback,
+                    "working",
+                    "Primary LLaVA request failed. Falling back to local classification.",
+                )
                 classification_result = self.classify_image_local(image_path)
             else:
                 raw = classification_result.get("raw", "")
+                self._emit_status(
+                    status_callback,
+                    "working",
+                    "Primary LLaVA response received. Validating required fields.",
+                )
                 slots = parse_llava_slots(raw)
                 if slots_present(slots):
                     description = build_description_from_slots(slots)
+                    if description_needs_repair(description):
+                        description = await self._repair_detailed_description(
+                            image_path,
+                            description,
+                            status_callback=status_callback,
+                        )
                     metadata.description = description
-                    metadata.tags = slots.get("tags", [])
+                    metadata.tags = self._clean_text_list(slots.get("tags", []), 10)
 
                     kw = []
                     kw += slots.get("colors", [])
                     for value in [slots.get("lighting"), slots.get("mood"), slots.get("style"), slots.get("setting")]:
                         if value:
                             kw.append(value)
-                    seen = set()
-                    metadata.keywords = [x for x in kw if not (x in seen or seen.add(x))][:12]
+                    metadata.keywords = self._clean_text_list(kw, 12)
 
                     cats = []
                     style_l = (slots.get("style") or "").lower()
@@ -543,34 +772,59 @@ class ClassificationEngine:
                     metadata.ai_model = classification_result.get("model", "")
                     metadata.ai_timestamp = classification_result.get("timestamp", "")
 
-                    metadata.classification = json.dumps(
-                        {**classification_result, "format": "slots", "slots": slots}
-                    )
+                    classification_result = {
+                        **classification_result,
+                        "format": "slots",
+                        "slots": slots,
+                    }
                 else:
+                    self._emit_status(
+                        status_callback,
+                        "working",
+                        "Structured response was incomplete. Trying the fallback prompt.",
+                    )
                     fallback_result = await self.classify_image_ollama(
                         image_path,
                         custom_prompt=OLLAMA_OLD_PROMPT,
                     )
                     if not fallback_result or "error" in fallback_result:
                         self.logger.info(f"Using local classification for {image_path}")
+                        self._emit_status(
+                            status_callback,
+                            "working",
+                            "Fallback LLaVA prompt failed. Falling back to local classification.",
+                        )
                         classification_result = self.classify_image_local(image_path)
                     else:
                         raw_old = fallback_result.get("raw", "")
+                        self._emit_status(
+                            status_callback,
+                            "working",
+                            "Fallback LLaVA response received. Normalizing metadata fields.",
+                        )
                         parsed = parse_llava_structured(raw_old)
                         metadata.description = parsed.get("description") or parsed.get("caption") or ""
-                        metadata.tags = parsed.get("tags", [])
-                        metadata.keywords = parsed.get("keywords", [])
-                        metadata.categories = parsed.get("categories", [])
+                        if description_needs_repair(metadata.description):
+                            metadata.description = await self._repair_detailed_description(
+                                image_path,
+                                metadata.description,
+                                status_callback=status_callback,
+                            )
+                        metadata.tags = self._clean_text_list(parsed.get("tags", []), 10)
+                        metadata.keywords = self._clean_text_list(parsed.get("keywords", []), 12)
+                        metadata.categories = self._clean_text_list(parsed.get("categories", []), 3)
 
                         metadata.ai_raw = raw_old
                         metadata.ai_provider = "ollama"
                         metadata.ai_model = fallback_result.get("model", "")
                         metadata.ai_timestamp = fallback_result.get("timestamp", "")
 
-                        metadata.classification = json.dumps(
-                            {**fallback_result, "format": "legacy", "parsed": parsed}
-                        )
-            
+                        classification_result = {
+                            **fallback_result,
+                            "format": "legacy",
+                            "parsed": parsed,
+                        }
+
             # Update metadata with classification results (local fallback path)
             if classification_result and 'error' not in classification_result and classification_result.get("api_used") != "ollama":
                 description = classification_result.get('description', '')
@@ -593,40 +847,114 @@ class ClassificationEngine:
                     metadata.categories.append(scene)
 
                 metadata.classification = json.dumps(classification_result)
-                
+
                 metadata.api_cached = True
                 metadata.cache_date = datetime.now()
-            
+
+            if classification_result and 'error' not in classification_result:
+                metadata = self._ensure_metadata_completeness(
+                    metadata,
+                    image_path,
+                    classification_result,
+                    status_callback=status_callback,
+                )
+
             # Save to database
+            self._emit_status(
+                status_callback,
+                "working",
+                "Saving classification results to the local database.",
+            )
             self.db_manager.add_image(metadata)
+            self._emit_status(
+                status_callback,
+                "completed",
+                "Classification complete. Description and metadata have been updated.",
+            )
             
             return metadata
             
         except Exception as e:
             self.logger.error(f"Error processing image {image_path}: {e}")
+            self._emit_status(
+                status_callback,
+                "failed",
+                f"Classification failed: {e}",
+            )
             return None
     
-    async def batch_process_images(self, image_paths: List[str], 
-                                  progress_callback: Optional[Callable[[int, int, str], None]] = None) -> List[ImageMetadata]:
+    async def batch_process_images(
+        self,
+        image_paths: List[str],
+        progress_callback: Optional[Callable[[int, int, str], None]] = None,
+        force_refresh: bool = False,
+        skip_existing: bool = True,
+        delay_seconds: float = 0.0,
+        status_callback: Optional[Callable[[int, int, str, str, str], None]] = None,
+    ) -> List[ImageMetadata]:
         """Process multiple images in batch."""
         results = []
-        total = len(image_paths)
+        pending_paths = []
+
+        for image_path in image_paths:
+            metadata = self.db_manager.get_image(image_path)
+            if skip_existing and not force_refresh and self.is_metadata_already_classified(metadata):
+                self.logger.info(f"Skipping already classified image {image_path}")
+                continue
+            pending_paths.append(image_path)
+
+        total = len(pending_paths)
+        if total == 0:
+            return results
         
-        for i, image_path in enumerate(image_paths):
+        for i, image_path in enumerate(pending_paths):
+            current = i + 1
             try:
-                metadata = await self.process_image(image_path)
+                if status_callback:
+                    status_callback(
+                        current,
+                        total,
+                        image_path,
+                        "received",
+                        f"Queued image {current} of {total}.",
+                    )
+
+                metadata = await self.process_image(
+                    image_path,
+                    force_refresh=force_refresh,
+                    status_callback=(
+                        lambda stage, detail, current=current, total=total, image_path=image_path:
+                        status_callback(current, total, image_path, stage, detail)
+                    ) if status_callback else None,
+                )
                 if metadata:
                     results.append(metadata)
                 
                 if progress_callback:
-                    progress_callback(i + 1, total, image_path)
+                    progress_callback(current, total, image_path)
                 
                 # Small delay to prevent overwhelming the API
-                if i < total - 1:
-                    await asyncio.sleep(0.1)
+                if i < total - 1 and delay_seconds > 0:
+                    if status_callback:
+                        status_callback(
+                            current,
+                            total,
+                            image_path,
+                            "working",
+                            f"Waiting {delay_seconds:.1f}s before the next image.",
+                        )
+                    await asyncio.sleep(delay_seconds)
                     
             except Exception as e:
                 self.logger.error(f"Error in batch processing {image_path}: {e}")
+                if status_callback:
+                    status_callback(
+                        current,
+                        total,
+                        image_path,
+                        "failed",
+                        f"Batch processing failed for this image: {e}",
+                    )
                 continue
         
         return results
