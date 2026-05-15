@@ -98,6 +98,18 @@ class DatabaseManager:
                     )
                 ''')
 
+                conn.execute('''
+                    CREATE TABLE IF NOT EXISTS image_stories (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        image_file_path TEXT NOT NULL,
+                        selected_hook TEXT,
+                        full_story TEXT,
+                        mode TEXT,
+                        created_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        FOREIGN KEY (image_file_path) REFERENCES images (file_path)
+                    )
+                ''')
+
                 self._ensure_columns(conn)
                 
                 # Create indexes for better performance
@@ -106,6 +118,7 @@ class DatabaseManager:
                 conn.execute('CREATE INDEX IF NOT EXISTS idx_rating ON images(rating)')
                 conn.execute('CREATE INDEX IF NOT EXISTS idx_format ON images(format)')
                 conn.execute('CREATE INDEX IF NOT EXISTS idx_classification ON images(classification)')
+                conn.execute('CREATE INDEX IF NOT EXISTS idx_story_image_path ON image_stories(image_file_path)')
                 
                 conn.commit()
                 self.logger.info("Database initialized successfully")
@@ -293,6 +306,35 @@ class DatabaseManager:
         except sqlite3.Error as e:
             self.logger.error(f"Error deleting image {file_path}: {e}")
             return False
+
+    def save_story(self, image_file_path: str, hook: str, story: str, mode: str) -> bool:
+        """Save a generated story to the database."""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute('''
+                    INSERT INTO image_stories (image_file_path, selected_hook, full_story, mode)
+                    VALUES (?, ?, ?, ?)
+                ''', (image_file_path, hook, story, mode))
+                conn.commit()
+                return True
+        except sqlite3.Error as e:
+            self.logger.error(f"Error saving story for {image_file_path}: {e}")
+            return False
+
+    def get_stories(self, image_file_path: str) -> List[Dict[str, Any]]:
+        """Retrieve all stories for a specific image."""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                cursor = conn.execute(
+                    'SELECT * FROM image_stories WHERE image_file_path = ? ORDER BY created_date DESC',
+                    (image_file_path,)
+                )
+                rows = cursor.fetchall()
+                return [dict(row) for row in rows]
+        except sqlite3.Error as e:
+            self.logger.error(f"Error retrieving stories for {image_file_path}: {e}")
+            return []
     
     def get_statistics(self) -> Dict[str, Any]:
         """Get database statistics."""

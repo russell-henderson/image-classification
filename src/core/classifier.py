@@ -193,7 +193,7 @@ def description_needs_repair(description: str) -> bool:
     if not text:
         return True
     words = re.findall(r"\b\w+\b", text)
-    return len(words) < 30 or description_has_speculation(text)
+    return len(words) < 40 or description_has_speculation(text)
 
 
 def parse_llava_structured(text: str) -> Dict[str, object]:

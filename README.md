@@ -199,7 +199,10 @@ Minimal example:
       "enabled": true,
       "base_url": "http://localhost:11434",
       "model": "llava:latest",
-      "timeout_seconds": 120
+      "timeout_seconds": 120,
+      "story_timeout_seconds": 150,
+      "story_retry_count": 1,
+      "story_quick_mode_enabled": true
     }
   },
   "classification": {
@@ -207,6 +210,15 @@ Minimal example:
   }
 }
 ```
+
+Storytelling-specific Ollama settings:
+
+- `story_timeout_seconds`
+  Upper bound for final narrative generation before the sidecar reports a timeout.
+- `story_retry_count`
+  Number of retry attempts after the first failed narrative attempt.
+- `story_quick_mode_enabled`
+  When enabled, retries switch to a shorter prompt intended to return faster.
 
 ## Ollama Setup
 
@@ -275,9 +287,23 @@ You can:
 
 - classify the selected image
 - clear classification
+- launch the storytelling sidecar with `Create`
 - save changes
 - revert changes
 - export metadata as JSON
+
+### Storytelling sidecar
+
+The storytelling flow is launched from the metadata panel with `Create`.
+
+The sidecar includes:
+
+- a UI status test
+- a Python bridge ping
+- an Ollama model readiness check
+- hook generation and manual Option 4 story direction
+
+The metadata panel also shows saved story history for the currently selected image.
 
 ### Batch processing
 

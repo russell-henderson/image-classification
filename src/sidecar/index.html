@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Creative Story Studio</title>
+    <style>
+        body { font-family: sans-serif; padding: 20px; background: #f5f5f5; }
+        .container { display: flex; flex-direction: column; gap: 20px; }
+        .section { background: white; padding: 15px; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }
+        .row { display: flex; gap: 15px; }
+        .col { flex: 1; }
+        h3 { margin-top: 0; color: #333; }
+        textarea { width: 100%; height: 100px; padding: 10px; border: 1px solid #ddd; border-radius: 4px; box-sizing: border-box; }
+        .hook-card { padding: 10px; border: 1px solid #eee; margin-bottom: 10px; cursor: pointer; border-radius: 4px; transition: background 0.2s; }
+        .hook-card:hover { background: #eef; }
+        .hook-card.selected { border-color: #007bff; background: #e7f1ff; }
+        .controls { display: flex; gap: 10px; align-items: center; margin-top: 10px; }
+        button { padding: 10px 20px; border: none; border-radius: 4px; background: #007bff; color: white; cursor: pointer; }
+        button:hover { background: #0056b3; }
+        button.chaos { background: #dc3545; }
+        .chaos-active { color: #dc3545; font-weight: bold; }
+        #narrative-output { white-space: pre-wrap; min-height: 150px; background: #fff; border: 1px solid #ddd; padding: 15px; border-radius: 4px; }
+        .status-panel { display: flex; align-items: center; gap: 10px; color: #444; font-size: 14px; }
+        .led { width: 12px; height: 12px; border-radius: 50%; background: #cfcfcf; display: inline-block; }
+        .active-blue { background: #2f6fed; }
+        .active-yellow { background: #f4b400; }
+        .active-green { background: #2f9d44; }
+        .active-red { background: #db4437; }
+        .status-leds { display: flex; gap: 6px; align-items: center; }
+        .status-block { display: flex; flex-direction: column; gap: 12px; }
+        .event-log { background: #fcfcfc; border: 1px solid #ddd; border-radius: 6px; padding: 10px; min-height: 120px; max-height: 180px; overflow-y: auto; font-size: 13px; }
+        .event-log-entry { padding: 4px 0; border-bottom: 1px solid #f0f0f0; color: #444; }
+        .event-log-entry:last-child { border-bottom: none; }
+        .event-log-entry strong { color: #222; }
+        .event-log-entry.error { color: #b3261e; }
+        .event-log-entry.done { color: #1f6f43; }
+        .event-log-entry.work { color: #8a6200; }
+        .event-log-entry.conn { color: #184ea6; }
+        .test-actions { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+        .secondary-btn { background: #5f6368; }
+        .secondary-btn:hover { background: #44474a; }
+        #bridge-state { color: #444; font-size: 13px; }
+        #model-state { color: #444; font-size: 13px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="section">
+            <div class="row">
+                <div class="col">
+                    <h3>Area A: Description</h3>
+                    <textarea id="area-a" readonly></textarea>
+                </div>
+                <div class="col">
+                    <h3>Area B: Tags</h3>
+                    <textarea id="area-b" readonly></textarea>
+                </div>
+            </div>
+        </div>
+
+        <div class="section">
+            <h3>Story Hooks</h3>
+            <div id="hooks-container">
+                <p>Waiting for hooks generation...</p>
+            </div>
+            
+            <div id="option-4-container" style="margin-top: 15px; display: none;">
+                <h3>Option 4: Custom Direction</h3>
+                <textarea id="custom-hook" placeholder="Enter your custom story direction here..."></textarea>
+                <button id="finish-btn">Finish & Generate</button>
+            </div>
+        </div>
+
+        <div class="section">
+            <div class="status-block">
+                <div style="display: flex; justify-content: space-between; align-items: center;">
+                <h3>Final Narrative</h3>
+                <div class="status-panel">
+                    <div class="status-leds">
+                        <span id="led-conn" class="led"></span>
+                        <span id="led-work" class="led"></span>
+                        <span id="led-done" class="led"></span>
+                    </div>
+                    <span id="status-text">Ready</span>
+                </div>
+                </div>
+                <div class="test-actions">
+                    <button id="test-status-btn" class="secondary-btn" type="button">Run UI Test Status</button>
+                    <button id="ping-python-btn" class="secondary-btn" type="button">Ping Python Bridge</button>
+                    <button id="check-model-btn" class="secondary-btn" type="button">Test Ollama Model</button>
+                    <span id="bridge-state">Bridge not tested yet.</span>
+                </div>
+                <div class="test-actions">
+                    <span id="model-state">Model not tested yet.</span>
+                </div>
+                <div class="test-actions">
+                    <span id="test-hint">Use this to confirm the sidecar UI is updating even before Python returns hooks.</span>
+                </div>
+                <div id="event-log" class="event-log"></div>
+            </div>
+            <div id="narrative-output">The story will appear here...</div>
+        </div>
+    </div>
+
+    <script>
+        const { ipcRenderer } = require('electron');
+
+        const areaA = document.getElementById('area-a');
+        const areaB = document.getElementById('area-b');
+        const hooksContainer = document.getElementById('hooks-container');
+        const option4Container = document.getElementById('option-4-container');
+        const customHook = document.getElementById('custom-hook');
+        const finishBtn = document.getElementById('finish-btn');
+        const narrativeOutput = document.getElementById('narrative-output');
+        const statusText = document.getElementById('status-text');
+        const ledConn = document.getElementById('led-conn');
+        const ledWork = document.getElementById('led-work');
+        const ledDone = document.getElementById('led-done');
+        const eventLog = document.getElementById('event-log');
+        const testStatusBtn = document.getElementById('test-status-btn');
+        const pingPythonBtn = document.getElementById('ping-python-btn');
+        const checkModelBtn = document.getElementById('check-model-btn');
+        const bridgeState = document.getElementById('bridge-state');
+        const modelState = document.getElementById('model-state');
+
+        let currentHooks = [];
+        let isChaos = false;
+
+        function appendLog(stage, text) {
+            const entry = document.createElement('div');
+            entry.className = `event-log-entry ${stage || 'idle'}`;
+            const timestamp = new Date().toLocaleTimeString();
+            entry.innerHTML = `<strong>[${timestamp}]</strong> ${text}`;
+            eventLog.prepend(entry);
+        }
+
+        function setStatus(stage, text) {
+            statusText.textContent = text;
+            
+            // Reset LEDs
+            ledConn.className = 'led';
+            ledWork.className = 'led';
+            ledDone.className = 'led';
+
+            if (stage === 'conn') {
+                ledConn.className = 'led active-blue';
+            } else if (stage === 'work') {
+                ledConn.className = 'led active-blue';
+                ledWork.className = 'led active-yellow';
+            } else if (stage === 'done') {
+                ledConn.className = 'led active-blue';
+                ledWork.className = 'led active-green';
+                ledDone.className = 'led active-green';
+            } else if (stage === 'error') {
+                ledConn.className = 'led active-red';
+                ledWork.className = 'led active-red';
+            }
+
+            appendLog(stage, text);
+        }
+
+        // Signal that the sidecar is ready to receive data
+        window.onload = () => {
+            setStatus('conn', 'Window loaded. Sending ready handshake to Python...');
+            ipcRenderer.send('to-python', { type: 'ready' });
+        };
+
+        ipcRenderer.on('from-python', (event, data) => {
+            if (data.type === 'init') {
+                areaA.value = data.description;
+                areaB.value = data.tags;
+                isChaos = data.isChaos;
+                setStatus('conn', 'Image seed loaded into the sidecar.');
+            } else if (data.type === 'status') {
+                setStatus(data.stage, data.message);
+            } else if (data.type === 'hooks') {
+                currentHooks = data.hooks;
+                renderHooks();
+                setStatus('done', 'Hooks Generated');
+            } else if (data.type === 'narrative') {
+                narrativeOutput.textContent = data.story;
+                setStatus('done', 'Narrative Complete');
+            } else if (data.type === 'narrative_error') {
+                narrativeOutput.textContent = data.message || 'Narrative generation failed.';
+                setStatus('error', 'Narrative generation failed.');
+            } else if (data.type === 'pong_python') {
+                const summary = [
+                    data.message || 'Python bridge replied.',
+                    `Description: ${data.hasDescription ? 'yes' : 'no'}`,
+                    `Tags: ${data.hasTags ? 'yes' : 'no'}`,
+                    `Complexity: ${data.complexity || 'unknown'}`,
+                    `Chaos: ${data.isChaos ? 'on' : 'off'}`
+                ].join(' | ');
+                bridgeState.textContent = summary;
+                setStatus('done', 'Python bridge replied successfully.');
+            } else if (data.type === 'model_status') {
+                const summary = [
+                    data.message || 'Model check completed.',
+                    `Model: ${data.model || 'unknown'}`,
+                    `Ready: ${data.ready ? 'yes' : 'no'}`
+                ].join(' | ');
+                modelState.textContent = summary;
+            }
+        });
+
+        testStatusBtn.onclick = () => {
+            setStatus('conn', 'UI test: handshake visible');
+            setTimeout(() => setStatus('work', 'UI test: work stage visible'), 500);
+            setTimeout(() => setStatus('done', 'UI test: done stage visible'), 1000);
+        };
+
+        pingPythonBtn.onclick = () => {
+            bridgeState.textContent = 'Waiting for Python bridge response...';
+            setStatus('conn', 'Sending ping to Python bridge...');
+            ipcRenderer.send('to-python', { type: 'ping_python' });
+        };
+
+        checkModelBtn.onclick = () => {
+            modelState.textContent = 'Waiting for Ollama model check...';
+            setStatus('conn', 'Requesting Ollama model readiness check...');
+            ipcRenderer.send('to-python', { type: 'check_model' });
+        };
+
+        function renderHooks() {
+            hooksContainer.innerHTML = '';
+            appendLog('done', `Rendering ${currentHooks.length} hook option(s).`);
+            currentHooks.forEach((hook, index) => {
+                const card = document.createElement('div');
+                card.className = 'hook-card';
+                card.textContent = `${index + 1}. ${hook}`;
+                card.onclick = () => selectHook(index, hook);
+                hooksContainer.appendChild(card);
+            });
+
+            // Always add the 4th option as special if not already there or just handle differently
+            if (currentHooks.length < 4) {
+                const card = document.createElement('div');
+                card.className = 'hook-card';
+                card.textContent = '4. [Custom Direction]';
+                card.onclick = () => showOption4();
+                hooksContainer.appendChild(card);
+            } else {
+                // If we got 4 from engine, the 4th one might be the custom one or we replace it
+                const cards = hooksContainer.querySelectorAll('.hook-card');
+                cards[3].textContent = '4. [Custom Direction]';
+                cards[3].onclick = () => showOption4();
+            }
+        }
+
+        function selectHook(index, hook) {
+            option4Container.style.display = 'none';
+            setStatus('work', `Selected hook ${index + 1}. Requesting narrative generation...`);
+            ipcRenderer.send('to-python', { type: 'select_hook', index, hook });
+            narrativeOutput.textContent = 'Generating narrative...';
+        }
+
+        function showOption4() {
+            option4Container.style.display = 'block';
+            setStatus('conn', 'Option 4 opened. Enter a custom direction and press Finish.');
+            customHook.focus();
+        }
+
+        finishBtn.onclick = () => {
+            const hook = customHook.value.trim();
+            if (hook) {
+                setStatus('work', 'Sending custom direction to Python...');
+                ipcRenderer.send('to-python', { type: 'finalize_story', custom_input: hook });
+                narrativeOutput.textContent = 'Generating narrative...';
+            }
+        };
+    </script>
+</body>
+</html>

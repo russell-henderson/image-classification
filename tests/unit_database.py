@@ -83,3 +83,22 @@ def test_statistics(tmp_path):
 
     stats = db.get_statistics()
     assert stats.get("total_images") == 1
+
+
+def test_save_and_get_stories(tmp_path):
+    db_path = tmp_path / "stories.db"
+    handler = ImageHandler()
+    db = DatabaseManager(str(db_path))
+
+    image_path = _create_test_image(tmp_path / "story.png")
+    metadata = handler.create_metadata(str(image_path))
+    assert metadata is not None
+    assert db.add_image(metadata) is True
+
+    assert db.save_story(metadata.file_path, "Hook A", "Story body", "Chaos/Complex") is True
+
+    stories = db.get_stories(metadata.file_path)
+    assert len(stories) == 1
+    assert stories[0]["selected_hook"] == "Hook A"
+    assert stories[0]["full_story"] == "Story body"
+    assert stories[0]["mode"] == "Chaos/Complex"

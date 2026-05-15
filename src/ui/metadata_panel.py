@@ -52,6 +52,8 @@ class MetadataPanel(tk.Frame):
         self.tags_var = tk.StringVar()
         self.keywords_var = tk.StringVar()
         self.categories_var = tk.StringVar()
+        self.story_complexity_var = tk.StringVar(value="Simple")
+        self.story_chaos_var = tk.BooleanVar(value=False)
         
         # Bind change events
         self.rating_var.trace('w', self._on_rating_change)
@@ -94,6 +96,7 @@ class MetadataPanel(tk.Frame):
         self._create_description_section()
         self._create_tags_section()
         self._create_classification_section()
+        self._create_story_history_section()
         self._create_technical_info_section()
         self._create_action_buttons()
     
@@ -115,15 +118,17 @@ class MetadataPanel(tk.Frame):
         row = self._create_section_header(self.content_frame, "Preview", row)
         
         # Preview frame
-        preview_frame = tk.Frame(self.content_frame, relief=tk.SUNKEN, borderwidth=2,
-                                height=200, bg="white")
-        preview_frame.grid(row=row, column=0, sticky="ew", padx=5, pady=5)
-        preview_frame.grid_propagate(False)
-        preview_frame.grid_columnconfigure(0, weight=0)
-        preview_frame.grid_columnconfigure(1, weight=1)
-        preview_frame.grid_rowconfigure(0, weight=1)
+        self.preview_container = tk.Frame(self.content_frame, relief=tk.SUNKEN, borderwidth=2,
+                                bg="white")
+        self.preview_container.grid(row=row, column=0, sticky="ew", padx=(5, 25), pady=5)
+        self.preview_container.grid_columnconfigure(1, weight=1)
+        self.preview_container.grid_rowconfigure(0, weight=1)
 
-        status_frame = tk.Frame(preview_frame, bg="white", width=170)
+        # Dynamic height constraint for container (max ~40% of typical panel height)
+        self.preview_container.configure(height=300) 
+        self.preview_container.grid_propagate(False)
+
+        status_frame = tk.Frame(self.preview_container, bg="white", width=170)
         status_frame.grid(row=0, column=0, sticky="nsw", padx=(18, 8), pady=14)
         status_frame.grid_propagate(False)
         status_frame.grid_columnconfigure(0, weight=1)
@@ -179,9 +184,9 @@ class MetadataPanel(tk.Frame):
         )
         self.status_message_label.grid(row=4, column=0, sticky="ew", pady=(10, 0))
 
-        self.preview_label = tk.Label(preview_frame, text="No image selected", 
+        self.preview_label = tk.Label(self.preview_container, text="No image selected", 
                                      bg="white", fg="gray")
-        self.preview_label.grid(row=0, column=1)
+        self.preview_label.grid(row=0, column=1, sticky="nsew")
 
         self._set_classification_status(self.STATUS_IDLE)
         
@@ -367,6 +372,43 @@ class MetadataPanel(tk.Frame):
                  command=self._classify_current_image).pack(side=tk.LEFT, padx=5)
         tk.Button(btn_frame, text="Clear Classification", 
                  command=self._clear_classification).pack(side=tk.LEFT, padx=5)
+        tk.Button(btn_frame, text="Create", 
+                 command=self._launch_sidecar).pack(side=tk.LEFT, padx=5)
+
+        story_controls = tk.Frame(class_frame)
+        story_controls.grid(row=2, column=0, sticky="ew", pady=(2, 4))
+        story_controls.grid_columnconfigure(4, weight=1)
+
+        tk.Label(story_controls, text="Story Mode:", font=("Arial", 9, "bold")).grid(
+            row=0, column=0, sticky="w", padx=(5, 4)
+        )
+        tk.Checkbutton(
+            story_controls,
+            text="Chaos / Spicy",
+            variable=self.story_chaos_var,
+            onvalue=True,
+            offvalue=False,
+        ).grid(row=0, column=1, sticky="w", padx=(0, 12))
+
+        tk.Label(story_controls, text="Complexity:", font=("Arial", 9, "bold")).grid(
+            row=0, column=2, sticky="w", padx=(0, 4)
+        )
+        self.story_complexity_combo = ttk.Combobox(
+            story_controls,
+            textvariable=self.story_complexity_var,
+            values=["Simple", "Complex"],
+            state="readonly",
+            width=10,
+        )
+        self.story_complexity_combo.grid(row=0, column=3, sticky="w")
+
+        story_help = tk.Label(
+            class_frame,
+            text="Story controls apply when launching the sidecar with Create.",
+            font=("Arial", 8),
+            fg="gray",
+        )
+        story_help.grid(row=3, column=0, sticky="w", padx=5)
         
         self.current_row = row + 1
     
@@ -387,6 +429,50 @@ class MetadataPanel(tk.Frame):
         self.exif_text.grid(row=0, column=0, sticky="ew", pady=2)
         exif_scrollbar.grid(row=0, column=1, sticky="ns")
         
+        self.current_row = row + 1
+
+    def _create_story_history_section(self):
+        """Create saved story history section."""
+        row = self._create_section_header(self.content_frame, "Saved Stories", self.current_row)
+
+        story_frame = tk.Frame(self.content_frame)
+        story_frame.grid(row=row, column=0, sticky="ew", padx=5, pady=5)
+        story_frame.grid_columnconfigure(0, weight=1)
+
+        self.story_listbox = tk.Listbox(story_frame, height=5, exportselection=False)
+        self.story_listbox.grid(row=0, column=0, sticky="ew", pady=(0, 4))
+        self.story_listbox.bind("<<ListboxSelect>>", self._on_story_select)
+
+        self.story_preview_text = tk.Text(
+            story_frame,
+            height=6,
+            wrap=tk.WORD,
+            font=("Arial", 9),
+            state=tk.DISABLED,
+        )
+        story_preview_scrollbar = ttk.Scrollbar(
+            story_frame,
+            orient="vertical",
+            command=self.story_preview_text.yview,
+        )
+        self.story_preview_text.configure(yscrollcommand=story_preview_scrollbar.set)
+        self.story_preview_text.grid(row=1, column=0, sticky="ew", pady=2)
+        story_preview_scrollbar.grid(row=1, column=1, sticky="ns")
+
+        story_btn_frame = tk.Frame(story_frame)
+        story_btn_frame.grid(row=2, column=0, sticky="ew", pady=4)
+        tk.Button(
+            story_btn_frame,
+            text="Refresh Stories",
+            command=self._refresh_story_history,
+        ).pack(side=tk.LEFT, padx=(0, 5))
+        tk.Button(
+            story_btn_frame,
+            text="Copy Story",
+            command=self._copy_selected_story,
+        ).pack(side=tk.LEFT, padx=5)
+
+        self.story_records: List[Dict[str, Any]] = []
         self.current_row = row + 1
     
     def _create_action_buttons(self):
@@ -452,6 +538,7 @@ class MetadataPanel(tk.Frame):
         self._set_exif_text(tech_text)
 
         self._set_classification_text(metadata)
+        self._refresh_story_history()
 
         self._updating_ui = was_updating
 
@@ -482,6 +569,83 @@ class MetadataPanel(tk.Frame):
         self.exif_text.delete("1.0", "end")
         self.exif_text.insert("1.0", text or "")
         self.exif_text.configure(state="disabled")
+
+    def _set_story_preview_text(self, text: str) -> None:
+        self.story_preview_text.configure(state="normal")
+        self.story_preview_text.delete("1.0", "end")
+        self.story_preview_text.insert("1.0", text or "")
+        self.story_preview_text.configure(state="disabled")
+
+    def _refresh_story_history(self) -> None:
+        """Reload saved stories for the selected image."""
+        self.story_listbox.config(state=tk.NORMAL)
+        self.story_listbox.delete(0, tk.END)
+        self.story_records = []
+        self._set_story_preview_text("")
+
+        if not self.current_metadata:
+            return
+
+        try:
+            self.story_records = self.db_manager.get_stories(self.current_metadata.file_path)
+            if not self.story_records:
+                self.story_listbox.insert(tk.END, "No saved stories yet")
+                self.story_listbox.config(state=tk.DISABLED)
+                return
+
+            self.story_listbox.config(state=tk.NORMAL)
+            for story in self.story_records:
+                created = story.get("created_date", "")
+                mode = story.get("mode", "Unknown")
+                hook = (story.get("selected_hook") or "").strip().replace("\n", " ")
+                hook_label = hook[:38] + "..." if len(hook) > 38 else hook
+                self.story_listbox.insert(tk.END, f"{created} | {mode} | {hook_label}")
+
+            self.story_listbox.selection_clear(0, tk.END)
+            self.story_listbox.selection_set(0)
+            self._show_story_record(0)
+        except Exception as e:
+            self.logger.error(f"Error loading story history: {e}")
+            self.story_listbox.insert(tk.END, "Story history unavailable")
+            self.story_listbox.config(state=tk.DISABLED)
+
+    def _show_story_record(self, index: int) -> None:
+        if index < 0 or index >= len(self.story_records):
+            self._set_story_preview_text("")
+            return
+
+        record = self.story_records[index]
+        preview = [
+            f"Mode: {record.get('mode', 'Unknown')}",
+            f"Created: {record.get('created_date', '')}",
+            "",
+            f"Hook: {record.get('selected_hook', '')}",
+            "",
+            record.get("full_story", ""),
+        ]
+        self._set_story_preview_text("\n".join(preview).strip())
+
+    def _on_story_select(self, _event=None) -> None:
+        selection = self.story_listbox.curselection()
+        if not selection:
+            return
+        self._show_story_record(selection[0])
+
+    def _copy_selected_story(self) -> None:
+        selection = self.story_listbox.curselection()
+        if not selection or not self.story_records:
+            messagebox.showinfo("Copy Story", "No saved story is selected.")
+            return
+
+        record = self.story_records[selection[0]]
+        story_text = record.get("full_story", "")
+        if not story_text:
+            messagebox.showinfo("Copy Story", "The selected story is empty.")
+            return
+
+        self.clipboard_clear()
+        self.clipboard_append(story_text)
+        messagebox.showinfo("Copy Story", "Selected story copied to clipboard.")
 
     def _build_technical_info(self, image_path: str) -> str:
         if not image_path or not os.path.exists(image_path):
@@ -543,7 +707,7 @@ class MetadataPanel(tk.Frame):
         return "\n".join(lines)
     
     def _update_preview(self):
-        """Update the preview image."""
+        """Update the preview image with dynamic scaling."""
         if not self.current_metadata:
             return
         
@@ -551,9 +715,23 @@ class MetadataPanel(tk.Frame):
             from core.image_handler import ImageHandler
             handler = ImageHandler()
             
-            # Create thumbnail
-            thumbnail = handler.create_thumbnail(self.current_metadata.file_path, 180)
+            # Calculate dynamic size based on container
+            self.update_idletasks()
+            container_width = self.preview_container.winfo_width() - 170 - 40 # space for status and padding
+            container_height = self.preview_container.winfo_height() - 20
+            
+            # Target size: max-height 40% of panel or use container's current size
+            # The panel's total height isn't easily known here, so we'll use the container's 
+            # height which is constrained.
+            
+            max_w = max(100, container_width)
+            max_h = max(100, container_height)
+
+            # Create thumbnail with dynamic scaling
+            thumbnail = handler.create_thumbnail(self.current_metadata.file_path, max(max_w, max_h))
             if thumbnail:
+                # Further resize to fit exactly while maintaining aspect ratio
+                thumbnail.thumbnail((max_w, max_h), Image.Resampling.LANCZOS)
                 tk_image = ImageTk.PhotoImage(thumbnail)
                 self.preview_label.config(image=tk_image, text="")
                 self.preview_label.image = tk_image  # Keep reference
@@ -703,6 +881,27 @@ class MetadataPanel(tk.Frame):
             categories = [cat.strip() for cat in self.categories_var.get().split(',') if cat.strip()]
             self.on_metadata_change(self.current_metadata.file_path, 'categories', categories)
     
+    def _launch_sidecar(self):
+        """Launch the persistent Electron sidecar window."""
+        if not self.current_metadata:
+            messagebox.showwarning("No Image", "Please select an image first.")
+            return
+        
+        description = self.description_text.get(1.0, tk.END).strip()
+        tags = self.tags_var.get()
+        is_chaos = bool(self.story_chaos_var.get())
+        complexity = self.story_complexity_var.get().strip() or "Simple"
+
+        try:
+            from core.sidecar_manager import SidecarManager
+            if not hasattr(self, 'sidecar_manager') or not self.sidecar_manager.is_alive():
+                self.sidecar_manager = SidecarManager(self.db_manager, self.classifier.config)
+            
+            self.sidecar_manager.launch(self.current_metadata, description, tags, complexity, is_chaos)
+        except Exception as e:
+            self.logger.error(f"Failed to launch sidecar: {e}")
+            messagebox.showerror("Sidecar Error", f"Failed to launch sidecar: {e}")
+
     def _classify_current_image(self):
         """Classify the current image."""
         if not self.current_metadata:
@@ -718,10 +917,12 @@ class MetadataPanel(tk.Frame):
             messagebox.showwarning("No Path", "Selected image has no filepath.")
             return
 
+        # Immediate feedback
         self._set_classification_status(
             self.STATUS_RECEIVED,
             "Command received. Queuing this image for classification.",
         )
+        self.update_idletasks() # Force UI update before threading
 
         threading.Thread(
             target=self._classify_current_image_async,

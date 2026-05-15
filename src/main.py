@@ -54,7 +54,10 @@ class ImageClassifierApp:
                     'enabled': True,
                     'base_url': 'http://localhost:11434',
                     'model': 'llava:latest',
-                    'timeout_seconds': 120
+                    'timeout_seconds': 120,
+                    'story_timeout_seconds': 150,
+                    'story_retry_count': 1,
+                    'story_quick_mode_enabled': True,
                 }
             },
             'classification': {

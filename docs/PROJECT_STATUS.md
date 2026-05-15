@@ -21,8 +21,13 @@ A local-first desktop GUI app that lets a user browse images, view metadata, and
 - Classification from the GUI is wired:
   - The MetadataPanel "Classify Image" button triggers the same `ClassificationEngine.process_image()` pipeline (async background thread).
   - Output is parsed and auto-populates Description, Tags, Keywords, Categories.
+- Storytelling sidecar is now implemented in code:
+  - The MetadataPanel `Create` button launches a persistent Electron sidecar.
+  - The sidecar is populated with the current image description and tags.
+  - Story hooks and narratives are generated through Ollama `dolphin3:8b`.
+  - Generated stories persist to the `image_stories` table in SQLite.
 - Tests pass:
-  - `pytest` currently reports: 11 passed.
+  - `pytest` currently reports: 18 passed.
 
 ### What was improved recently
 
@@ -112,9 +117,24 @@ Future tuning levers:
 - Expand keyword generation to include environment and lighting phrases.
 - Add controlled vocabulary for style and environment.
 
-### 3) Sidecar or embedded metadata is not implemented yet
+### 3) Sidecar storytelling has landed, but still needs manual runtime verification
 
-Next major feature:
+Implemented:
+
+- `src/core/story_engine.py`
+- `src/core/sidecar_manager.py`
+- `src/sidecar/` Electron UI
+- `image_stories` persistence in SQLite
+
+Still pending:
+
+- Manual end-to-end verification of the Electron window on the local Windows environment
+- Additional test coverage for sidecar process lifecycle behavior
+- Alignment between storytelling workflow docs and the older project export/history
+
+### 4) Sidecar or embedded metadata for image files is still not implemented
+
+Next major metadata feature:
 
 - Sidecar JSON or XMP next to images.
 - Optional EXIF/IPTC/XMP embedding for JPEG where safe.
@@ -146,11 +166,15 @@ From repo root:
 2) Improve slot enforcement:
    - Add a description quality gate and single retry.
    - Strengthen slot prompt wording.
-3) Sidecar metadata (planned next):
+3) Manual sidecar verification and polish:
+   - Confirm Electron sidecar startup and IPC on Windows with Ollama running.
+   - Improve storytelling mode controls in the UI.
+   - Add story-history visibility in the main panel if needed.
+4) Sidecar metadata (planned next):
    - Decide schema: per-image JSON sidecar near the file.
    - Write sidecar on Save Changes and optionally on Classify.
    - Load sidecar on scan, then merge with DB rules (DB overrides vs sidecar overrides).
-4) UI polish:
+5) UI polish:
    - Show a "Classifying..." status indicator.
    - Disable classify button while running.
    - Better error surfacing if Ollama fails or times out.
