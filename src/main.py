@@ -9,6 +9,8 @@ import tkinter as tk
 from tkinter import ttk
 from pathlib import Path
 from typing import Dict, Any
+import subprocess
+import urllib.request
 
 try:
     import customtkinter as ctk
@@ -18,8 +20,9 @@ except ImportError:
     import tkinter as ctk
 
 from core.database import DatabaseManager
-from core.image_handler import ImageHandler
+from core.image_handler import ImageHandler, FileOperator
 from core.classifier import ClassificationEngine
+from core.story_engine import StoryEngine
 from ui.browser import ImageBrowser
 from ui.metadata_panel import MetadataPanel
 from ui.batch_processor import BatchProcessor
@@ -39,6 +42,7 @@ class ImageClassifierApp:
             thumbnail_size=self.config['thumbnail_size'],
             max_image_size=self.config['max_image_size']
         )
+        self.file_operator = FileOperator(self.db_manager)
         self.classifier = ClassificationEngine(self.config, self.db_manager)
 
         # Initialize UI
@@ -169,6 +173,14 @@ class ImageClassifierApp:
         tools_menu.add_command(label="Search Similar",
                                command=self._search_similar)
         tools_menu.add_separator()
+        file_management_menu = tk.Menu(tools_menu, tearoff=0)
+        file_management_menu.add_command(label="Open in Windows Explorer",
+                                         command=self._open_selected_in_explorer)
+        file_management_menu.add_command(label="Scan for Missing Files",
+                                         command=self._scan_for_missing_files)
+        tools_menu.add_cascade(label="File Management", menu=file_management_menu)
+        tools_menu.add_command(label="Connection Diagnostics",
+                               command=self._show_connection_diagnostics)
         tools_menu.add_command(label="Clear Cache", command=self._clear_cache)
         tools_menu.add_command(label="Database Stats",
                                command=self._show_stats)
@@ -201,7 +213,8 @@ class ImageClassifierApp:
             self.image_handler,
             self.classifier,
             grid_columns=self.config.get('grid_columns', 6),  # default toward 6
-            on_selection_change=self._on_image_selection
+            on_selection_change=self._on_image_selection,
+            on_file_request=self._handle_file_request,
         )
         self.image_browser.grid(row=0, column=0, sticky="nsew", padx=(0, 5))
 
@@ -210,7 +223,8 @@ class ImageClassifierApp:
             main_frame,
             self.classifier,
             self.db_manager,
-            on_metadata_change=self._on_metadata_change
+            on_metadata_change=self._on_metadata_change,
+            on_file_request=self._handle_file_request,
         )
         self.metadata_panel.grid(row=0, column=1, sticky="nsew", padx=(5, 0))
 
@@ -256,6 +270,41 @@ class ImageClassifierApp:
 
         if files:
             self.image_browser.load_images(list(files))
+
+    def _handle_file_request(self, action: str, image_path: str, **kwargs):
+        """Execute a file request and synchronize the browser and metadata panel."""
+        result = {
+            "success": False,
+            "action": action,
+            "old_path": image_path,
+        }
+
+        try:
+            if action == "rename":
+                new_path = self.file_operator.rename_image(image_path, kwargs.get("new_name", ""))
+                result.update({"success": True, "new_path": new_path})
+            elif action == "move":
+                new_path = self.file_operator.move_image(image_path, kwargs.get("destination_folder", ""))
+                result.update({"success": True, "new_path": new_path})
+            elif action == "delete":
+                self.file_operator.delete_image(image_path)
+                result.update({"success": True})
+            elif action == "scan_missing":
+                removed_paths = self.db_manager.remove_missing_files()
+                result.update({"success": True, "removed_paths": removed_paths})
+            else:
+                result["error"] = f"Unsupported file action: {action}"
+                return result
+        except Exception as e:
+            self.logger.error("File action %s failed for %s: %s", action, image_path, e)
+            result["error"] = str(e)
+            return result
+
+        self.image_browser.apply_file_action_result(result)
+        if self.image_browser.get_selected_image() is None:
+            self.metadata_panel.clear_metadata()
+
+        return result
 
     def _show_batch_processor(self):
         """Show the batch processing dialog."""
@@ -303,6 +352,73 @@ class ImageClassifierApp:
         ])
 
         self._show_message(stats_text, "Database Statistics")
+
+    def _open_selected_in_explorer(self):
+        """Open the selected image in Windows Explorer."""
+        current_image = self.image_browser.get_selected_image()
+        if not current_image:
+            self._show_message("Please select an image first.", "File Management")
+            return
+
+        if not Path(current_image).exists():
+            self._show_message("The selected file no longer exists on disk.", "File Management")
+            return
+
+        try:
+            subprocess.Popen(["explorer.exe", "/select,", current_image])
+        except Exception as e:
+            self.logger.error("Failed to open Windows Explorer for %s: %s", current_image, e)
+            self._show_message(f"Unable to open Windows Explorer: {e}", "File Management")
+
+    def _scan_for_missing_files(self):
+        """Remove database rows for files that were deleted outside the app."""
+        result = self._handle_file_request("scan_missing", "")
+        if not result.get("success"):
+            self._show_message(result.get("error", "Missing file scan failed."), "File Management")
+            return
+
+        removed_paths = result.get("removed_paths", [])
+        if removed_paths:
+            self._show_message(
+                f"Removed {len(removed_paths)} missing file entries from the database.",
+                "File Management",
+            )
+        else:
+            self._show_message("No missing file entries were found.", "File Management")
+
+    def _show_connection_diagnostics(self):
+        """Show local diagnostics for Ollama and Electron dependencies."""
+        results = []
+        ollama_cfg = self.config.get("providers", {}).get("ollama", {})
+        base_url = ollama_cfg.get("base_url", "http://localhost:11434").rstrip("/")
+        llava_model = ollama_cfg.get("model", "llava:latest")
+        story_engine = StoryEngine(self.config)
+
+        try:
+            req = urllib.request.Request(f"{base_url}/api/tags", method="GET")
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                payload = json.loads(resp.read().decode("utf-8"))
+            models = {model.get("name", "") for model in payload.get("models", [])}
+            results.append(f"Ollama endpoint: reachable at {base_url}")
+            results.append(f"LLaVA model ({llava_model}): {'present' if llava_model in models else 'missing'}")
+            results.append(f"Story model ({story_engine.model}): {'present' if story_engine.model in models else 'missing'}")
+        except Exception as e:
+            results.append(f"Ollama endpoint: FAILED ({e})")
+
+        sidecar_root = Path(__file__).parent / "sidecar"
+        electron_exe = sidecar_root / "node_modules" / "electron" / "dist" / "electron.exe"
+        electron_cmd = sidecar_root / "node_modules" / ".bin" / "electron.cmd"
+        if electron_exe.exists():
+            results.append(f"Electron binary: present ({electron_exe})")
+        elif electron_cmd.exists():
+            results.append(f"Electron command shim: present ({electron_cmd})")
+        else:
+            results.append("Electron binary: missing")
+
+        bridge_root = Path(__file__).parent.parent / ".tmp" / "sidecar_bridge"
+        results.append(f"Sidecar bridge directory: {'present' if bridge_root.exists() else 'not created yet'} ({bridge_root})")
+
+        self._show_message("\n".join(results), "Connection Diagnostics")
 
     def _show_settings(self):
         """Show settings dialog."""

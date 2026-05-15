@@ -6,9 +6,9 @@ import asyncio
 import logging
 import threading
 import tkinter as tk
-from tkinter import ttk, filedialog
+from tkinter import ttk, filedialog, messagebox, simpledialog
 from pathlib import Path
-from typing import List, Optional, Callable
+from typing import List, Optional, Callable, Dict, Any
 
 try:
     import customtkinter as ctk
@@ -51,7 +51,8 @@ class ImageBrowser(tk.Frame):
     def __init__(self, parent, db_manager: DatabaseManager,
                  image_handler: ImageHandler,
                  classifier: ClassificationEngine, grid_columns: int = 4,
-                 on_selection_change: Optional[Callable[[str], None]] = None):
+                 on_selection_change: Optional[Callable[[str], None]] = None,
+                 on_file_request: Optional[Callable[..., Dict[str, Any]]] = None):
         super().__init__(parent)
 
         self.db_manager = db_manager
@@ -59,6 +60,7 @@ class ImageBrowser(tk.Frame):
         self.classifier = classifier
         self.grid_columns = grid_columns
         self.on_selection_change = on_selection_change
+        self.on_file_request = on_file_request
         self.logger = logging.getLogger(__name__)
 
         # State
@@ -70,6 +72,14 @@ class ImageBrowser(tk.Frame):
         self._size_change_after_id = None
         self._last_thumb_size = self.thumbnail_size
         self._resize_after_id = None
+        self.lightbox_window = None
+        self.lightbox_label = None
+        self.lightbox_caption = None
+        self.lightbox_source_image = None
+        self.lightbox_tk_image = None
+        self.lightbox_index: Optional[int] = None
+        self._grid_column_count = 0
+        self._delete_dialog = None
 
         # Threading for async operations
         self.executor = None
@@ -181,6 +191,26 @@ class ImageBrowser(tk.Frame):
 
         self.progress = ttk.Progressbar(self.status_bar, length=200)
         self.progress.pack(side=tk.RIGHT, padx=5)
+
+    def _bind_file_menu(self, widget, image_path: str):
+        """Bind right-click context actions to a widget."""
+        widget.bind("<Button-3>", lambda e, path=image_path: self._show_context_menu(e, path))
+        widget.bind("<Button-2>", lambda e, path=image_path: self._show_context_menu(e, path))
+
+    def _show_context_menu(self, event, image_path: str):
+        """Show the file action context menu for a thumbnail."""
+        self._on_image_click(image_path)
+
+        menu = tk.Menu(self, tearoff=0)
+        menu.add_command(label="Rename", command=lambda: self._rename_image(image_path))
+        menu.add_command(label="Move to Folder", command=lambda: self._move_image(image_path))
+        menu.add_separator()
+        menu.add_command(label="Delete", command=lambda: self._confirm_delete_image(image_path))
+
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
 
     def _set_view_mode(self, mode: str):
         """Set the view mode (grid or list)."""
@@ -439,18 +469,19 @@ class ImageBrowser(tk.Frame):
         if canvas_width <= 1:
             canvas_width = 800
 
-        tile_pad_x = 12  # keep current assumption for now
-        desired_columns = 3
-        max_thumb_size = (canvas_width - (tile_pad_x * desired_columns)) // desired_columns
+        tile_pad_x = 12
+        max_thumb_size = canvas_width - (tile_pad_x * 2)
         effective_thumb_size = self.thumbnail_size
         if max_thumb_size > 0 and effective_thumb_size > max_thumb_size:
             effective_thumb_size = max_thumb_size
 
-        tile_width = effective_thumb_size + tile_pad_x
-        actual_columns = max(1, min(desired_columns, canvas_width // tile_width))
-
-        used_width = actual_columns * tile_width
-        left_margin = max(0, (canvas_width - used_width) // 2)
+        tile_width = effective_thumb_size + (tile_pad_x * 2)
+        actual_columns = max(1, canvas_width // max(tile_width, 1))
+        for col in range(max(self._grid_column_count, actual_columns)):
+            self.content_frame.grid_columnconfigure(col, weight=0, uniform="")
+        for col in range(actual_columns):
+            self.content_frame.grid_columnconfigure(col, weight=1, uniform="thumb")
+        self._grid_column_count = actual_columns
 
         for i, thumbnail in enumerate(thumbnails):
             row = i // actual_columns
@@ -461,7 +492,7 @@ class ImageBrowser(tk.Frame):
                 thumbnail,
                 row,
                 col,
-                left_margin=left_margin if col == 0 else 0,
+                left_margin=0,
                 thumb_size=effective_thumb_size
             )
 
@@ -492,6 +523,8 @@ class ImageBrowser(tk.Frame):
             img_label.pack(pady=2)
             img_label.bind("<Button-1>", lambda e,
                            path=thumbnail.metadata.file_path: self._on_image_click(path))
+            img_label.bind("<Double-Button-1>", lambda e,
+                           path=thumbnail.metadata.file_path: self._open_lightbox(path))
 
         # Filename label
         filename = Path(thumbnail.metadata.filename).stem
@@ -505,6 +538,8 @@ class ImageBrowser(tk.Frame):
             wraplength=thumb_size or self.thumbnail_size
         )
         name_label.pack()
+        name_label.bind("<Button-1>", lambda e,
+                        path=thumbnail.metadata.file_path: self._on_image_click(path))
 
         # Rating and info
         info_text = f"★{thumbnail.metadata.rating}" if thumbnail.metadata.rating > 0 else ""
@@ -515,12 +550,21 @@ class ImageBrowser(tk.Frame):
             info_label = tk.Label(frame, text=info_text,
                                   font=("Arial", 7), fg="blue")
             info_label.pack()
+            info_label.bind("<Button-1>", lambda e,
+                            path=thumbnail.metadata.file_path: self._on_image_click(path))
 
         thumbnail.widget = frame
 
-        # Double-click to classify
+        frame.bind("<Button-1>", lambda e,
+                   path=thumbnail.metadata.file_path: self._on_image_click(path))
         frame.bind("<Double-Button-1>", lambda e,
-                   path=thumbnail.metadata.file_path: self._classify_image(path))
+                   path=thumbnail.metadata.file_path: self._open_lightbox(path))
+        self._bind_file_menu(frame, thumbnail.metadata.file_path)
+        if tk_image:
+            self._bind_file_menu(img_label, thumbnail.metadata.file_path)
+        self._bind_file_menu(name_label, thumbnail.metadata.file_path)
+        if info_text:
+            self._bind_file_menu(info_label, thumbnail.metadata.file_path)
 
     def _create_list_widget(self, thumbnail: ImageThumbnail, row: int):
         """Create a list widget for list view."""
@@ -535,6 +579,8 @@ class ImageBrowser(tk.Frame):
             img_label.grid(row=0, column=0, rowspan=2, padx=5, pady=5)
             img_label.bind("<Button-1>", lambda e,
                            path=thumbnail.metadata.file_path: self._on_image_click(path))
+            img_label.bind("<Double-Button-1>", lambda e,
+                           path=thumbnail.metadata.file_path: self._open_lightbox(path))
 
         # File info
         info_frame = tk.Frame(frame)
@@ -567,9 +613,16 @@ class ImageBrowser(tk.Frame):
 
         thumbnail.widget = frame
 
-        # Double-click to classify
+        frame.bind("<Button-1>", lambda e,
+                   path=thumbnail.metadata.file_path: self._on_image_click(path))
         frame.bind("<Double-Button-1>", lambda e,
-                   path=thumbnail.metadata.file_path: self._classify_image(path))
+                   path=thumbnail.metadata.file_path: self._open_lightbox(path))
+        self._bind_file_menu(frame, thumbnail.metadata.file_path)
+        if tk_image:
+            self._bind_file_menu(img_label, thumbnail.metadata.file_path)
+        self._bind_file_menu(name_label, thumbnail.metadata.file_path)
+        self._bind_file_menu(desc_label, thumbnail.metadata.file_path)
+        self._bind_file_menu(meta_label, thumbnail.metadata.file_path)
 
     def _on_image_click(self, image_path: str):
         """Handle image selection."""
@@ -646,6 +699,273 @@ class ImageBrowser(tk.Frame):
     def get_selected_image(self) -> Optional[str]:
         """Get the currently selected image path."""
         return self.selected_image
+
+    def _open_lightbox(self, image_path: str):
+        """Open a large lightbox view for the clicked image."""
+        try:
+            image = Image.open(image_path)
+            image.load()
+        except Exception as e:
+            self.logger.error(f"Error opening lightbox image {image_path}: {e}")
+            self.status_label.config(text=f"Lightbox error: {e}")
+            return
+
+        if self.lightbox_window and self.lightbox_window.winfo_exists():
+            self.lightbox_window.destroy()
+
+        self.lightbox_source_image = image
+        self.lightbox_index = self._get_image_index(image_path)
+        self.lightbox_window = tk.Toplevel(self)
+        self.lightbox_window.title(Path(image_path).name)
+        self.lightbox_window.configure(bg="black")
+        self.lightbox_window.geometry("1280x860")
+        self.lightbox_window.minsize(640, 480)
+        self.lightbox_window.transient(self.winfo_toplevel())
+        self.lightbox_window.bind("<Escape>", lambda _e: self._close_lightbox())
+        self.lightbox_window.bind("<Left>", lambda _e: self._show_adjacent_lightbox(-1))
+        self.lightbox_window.bind("<Right>", lambda _e: self._show_adjacent_lightbox(1))
+        self.lightbox_window.bind("<Configure>", self._on_lightbox_resize)
+        self.lightbox_window.focus_set()
+
+        self.lightbox_label = tk.Label(self.lightbox_window, bg="black")
+        self.lightbox_label.pack(fill="both", expand=True, padx=20, pady=(20, 8))
+        self.lightbox_label.bind("<Button-1>", lambda _e: self._close_lightbox())
+
+        self.lightbox_caption = tk.Label(
+            self.lightbox_window,
+            text=f"{Path(image_path).name}  |  Left/Right to browse, Esc or click image to close",
+            bg="black",
+            fg="white",
+            font=("Arial", 10),
+        )
+        self.lightbox_caption.pack(fill="x", padx=20, pady=(0, 16))
+
+        self._render_lightbox_image()
+
+    def _render_lightbox_image(self):
+        if not self.lightbox_window or not self.lightbox_source_image or not self.lightbox_label:
+            return
+        if not self.lightbox_window.winfo_exists():
+            return
+
+        self.lightbox_window.update_idletasks()
+        max_w = max(200, self.lightbox_window.winfo_width() - 80)
+        max_h = max(200, self.lightbox_window.winfo_height() - 120)
+
+        img = self.lightbox_source_image.copy()
+        img.thumbnail((max_w, max_h), Image.Resampling.LANCZOS)
+        self.lightbox_tk_image = ImageTk.PhotoImage(img)
+        self.lightbox_label.config(image=self.lightbox_tk_image)
+
+    def _get_image_index(self, image_path: str) -> Optional[int]:
+        """Return the index of an image in the current gallery ordering."""
+        for index, thumbnail in enumerate(self.current_images):
+            if thumbnail.metadata.file_path == image_path:
+                return index
+        return None
+
+    def _show_adjacent_lightbox(self, delta: int):
+        """Move to the previous or next image in the lightbox."""
+        if self.lightbox_index is None or not self.current_images:
+            return
+        self.lightbox_index = (self.lightbox_index + delta) % len(self.current_images)
+        next_path = self.current_images[self.lightbox_index].metadata.file_path
+        try:
+            image = Image.open(next_path)
+            image.load()
+        except Exception as e:
+            self.logger.error(f"Error opening lightbox image {next_path}: {e}")
+            self.status_label.config(text=f"Lightbox error: {e}")
+            return
+
+        self.lightbox_source_image = image
+        if self.lightbox_window and self.lightbox_window.winfo_exists():
+            self.lightbox_window.title(Path(next_path).name)
+        if self.lightbox_caption:
+            self.lightbox_caption.config(
+                text=f"{Path(next_path).name}  |  Left/Right to browse, Esc or click image to close"
+            )
+        self._render_lightbox_image()
+
+    def _on_lightbox_resize(self, event):
+        if event.widget is self.lightbox_window:
+            self.after(10, self._render_lightbox_image)
+
+    def _close_lightbox(self):
+        if self.lightbox_window and self.lightbox_window.winfo_exists():
+            self.lightbox_window.destroy()
+        self.lightbox_window = None
+        self.lightbox_label = None
+        self.lightbox_caption = None
+        self.lightbox_source_image = None
+        self.lightbox_tk_image = None
+        self.lightbox_index = None
+
+    def _rename_image(self, image_path: str):
+        """Prompt for a new filename and request a rename."""
+        current_name = Path(image_path).name
+        new_name = simpledialog.askstring(
+            "Rename Image",
+            "Enter the new filename:",
+            initialvalue=current_name,
+            parent=self,
+        )
+        if new_name is None:
+            return
+
+        result = self._dispatch_file_request("rename", image_path, new_name=new_name)
+        self._handle_file_result(result)
+
+    def _move_image(self, image_path: str):
+        """Prompt for a destination folder and request a move."""
+        destination = filedialog.askdirectory(title="Move Image To Folder")
+        if not destination:
+            return
+
+        result = self._dispatch_file_request("move", image_path, destination_folder=destination)
+        self._handle_file_result(result)
+
+    def _confirm_delete_image(self, image_path: str):
+        """Show a non-blocking delete confirmation dialog."""
+        if self._delete_dialog and self._delete_dialog.winfo_exists():
+            self._delete_dialog.destroy()
+
+        dialog = tk.Toplevel(self)
+        dialog.title("Delete Image")
+        dialog.transient(self.winfo_toplevel())
+        dialog.resizable(False, False)
+        dialog.geometry("+%d+%d" % (self.winfo_rootx() + 140, self.winfo_rooty() + 140))
+
+        tk.Label(
+            dialog,
+            text=f"Delete {Path(image_path).name}?\nThis removes the file and its database entry.",
+            justify=tk.LEFT,
+            padx=18,
+            pady=16,
+        ).pack(fill="both", expand=True)
+
+        button_row = tk.Frame(dialog)
+        button_row.pack(fill="x", padx=12, pady=(0, 12))
+        tk.Button(button_row, text="Cancel", command=dialog.destroy).pack(side=tk.RIGHT, padx=(8, 0))
+        tk.Button(
+            button_row,
+            text="Delete",
+            bg="#c0392b",
+            fg="white",
+            command=lambda: self._execute_delete_image(dialog, image_path),
+        ).pack(side=tk.RIGHT)
+
+        self._delete_dialog = dialog
+
+    def _execute_delete_image(self, dialog, image_path: str):
+        dialog.destroy()
+        result = self._dispatch_file_request("delete", image_path)
+        self._handle_file_result(result)
+
+    def _dispatch_file_request(self, action: str, image_path: str, **kwargs) -> Dict[str, Any]:
+        """Send a file action request to the application controller."""
+        if not self.on_file_request:
+            return {"success": False, "action": action, "error": "File management is not configured."}
+        return self.on_file_request(action, image_path, **kwargs)
+
+    def _handle_file_result(self, result: Dict[str, Any]):
+        """Surface the outcome of a file request in the browser UI."""
+        if not result.get("success"):
+            error = result.get("error", "File operation failed.")
+            self.status_label.config(text=error)
+            messagebox.showerror("File Operation Error", error)
+            return
+
+    def apply_file_action_result(self, result: Dict[str, Any]):
+        """Apply a successful file action result to the gallery state."""
+        action = result.get("action")
+        old_path = result.get("old_path")
+        new_path = result.get("new_path")
+
+        if action == "rename" and old_path and new_path:
+            self._replace_thumbnail_path(old_path, new_path)
+            self.status_label.config(text=f"Renamed to {Path(new_path).name}")
+            self._on_image_click(new_path)
+            return
+
+        if action == "move" and old_path:
+            self._remove_thumbnail_and_select_next(old_path)
+            self.status_label.config(text=f"Moved {Path(old_path).name}")
+            return
+
+        if action == "delete" and old_path:
+            self._remove_thumbnail_and_select_next(old_path)
+            self.status_label.config(text=f"Deleted {Path(old_path).name}")
+            return
+
+        if action == "scan_missing":
+            removed_paths = result.get("removed_paths", [])
+            if removed_paths:
+                self.remove_images(removed_paths)
+                self.status_label.config(text=f"Removed {len(removed_paths)} missing file entries")
+            else:
+                self.status_label.config(text="No missing file entries found")
+
+    def _replace_thumbnail_path(self, old_path: str, new_path: str):
+        """Update a thumbnail's metadata after a rename."""
+        fresh_metadata = self.db_manager.get_image(new_path)
+        for thumbnail in self.current_images:
+            if thumbnail.metadata.file_path == old_path:
+                if fresh_metadata:
+                    thumbnail.metadata = fresh_metadata
+                else:
+                    thumbnail.metadata.file_path = new_path
+                    thumbnail.metadata.filename = Path(new_path).name
+                thumbnail.thumbnail_image = self.image_handler.create_thumbnail(new_path, self.thumbnail_size)
+                thumbnail.tk_image = None
+                break
+        if self.selected_image == old_path:
+            self.selected_image = new_path
+        self._refresh_display()
+
+    def _remove_thumbnail_and_select_next(self, image_path: str):
+        """Remove an image from the gallery and select the next available item."""
+        removed_index = None
+        for index, thumbnail in enumerate(self.current_images):
+            if thumbnail.metadata.file_path == image_path:
+                removed_index = index
+                break
+
+        if removed_index is None:
+            return
+
+        del self.current_images[removed_index]
+        if self.selected_image == image_path:
+            self.selected_image = None
+
+        self._refresh_display()
+
+        if not self.current_images:
+            return
+
+        next_index = min(removed_index, len(self.current_images) - 1)
+        self._on_image_click(self.current_images[next_index].metadata.file_path)
+
+    def remove_images(self, image_paths: List[str]):
+        """Remove multiple images from the current gallery and preserve selection when possible."""
+        if not image_paths:
+            return
+
+        removal_set = set(image_paths)
+        current_selected = self.selected_image
+        self.current_images = [
+            thumbnail for thumbnail in self.current_images
+            if thumbnail.metadata.file_path not in removal_set
+        ]
+
+        self._refresh_display()
+
+        if current_selected and current_selected not in removal_set:
+            self._on_image_click(current_selected)
+        elif self.current_images:
+            self._on_image_click(self.current_images[0].metadata.file_path)
+        else:
+            self.selected_image = None
 
     def refresh_current_view(self):
         """Refresh the current view (used after metadata changes)."""

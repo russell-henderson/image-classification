@@ -2,8 +2,9 @@
 Image handling utilities for loading, processing, and extracting metadata from images.
 """
 
-import os
 import logging
+import os
+import shutil
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
 from datetime import datetime
@@ -21,7 +22,112 @@ except ImportError:
     cv2 = None
     np = None
 
-from .database import ImageMetadata
+from .database import DatabaseManager, ImageMetadata
+
+
+class FileOperator:
+    """File operations that keep the metadata database synchronized."""
+
+    def __init__(self, db_manager: DatabaseManager):
+        self.db_manager = db_manager
+        self.logger = logging.getLogger(__name__)
+
+    def rename_image(self, file_path: str, new_name: str) -> str:
+        """Rename an image file and update the stored path only after success."""
+        source = Path(file_path)
+        target_name = (new_name or "").strip()
+
+        if not source.exists():
+            raise FileNotFoundError(f"File not found: {file_path}")
+        if not target_name:
+            raise ValueError("New filename cannot be empty.")
+
+        if not Path(target_name).suffix:
+            target_name = f"{target_name}{source.suffix}"
+
+        destination = source.with_name(target_name)
+        if destination == source:
+            return str(source)
+        if destination.exists():
+            raise FileExistsError(f"Target file already exists: {destination}")
+
+        try:
+            os.rename(source, destination)
+        except OSError as exc:
+            self.logger.error("Rename failed for %s -> %s: %s", source, destination, exc)
+            raise RuntimeError(f"Unable to rename file: {exc}") from exc
+
+        if not self.db_manager.update_image_path(str(source), str(destination)):
+            try:
+                os.rename(destination, source)
+            except OSError as rollback_exc:
+                self.logger.error(
+                    "Database path update failed and rollback also failed for %s: %s",
+                    destination,
+                    rollback_exc,
+                )
+            raise RuntimeError("Rename succeeded on disk, but the database update failed.")
+
+        self.logger.info("Renamed image %s -> %s", source, destination)
+        return str(destination)
+
+    def move_image(self, file_path: str, destination_folder: str) -> str:
+        """Move an image to another folder and update its stored path after success."""
+        source = Path(file_path)
+        destination_root = Path(destination_folder)
+
+        if not source.exists():
+            raise FileNotFoundError(f"File not found: {file_path}")
+        if not destination_folder:
+            raise ValueError("Destination folder cannot be empty.")
+        if not destination_root.exists():
+            raise FileNotFoundError(f"Destination folder not found: {destination_folder}")
+        if not destination_root.is_dir():
+            raise NotADirectoryError(f"Destination is not a folder: {destination_folder}")
+
+        destination = destination_root / source.name
+        if destination == source:
+            return str(source)
+        if destination.exists():
+            raise FileExistsError(f"Target file already exists: {destination}")
+
+        try:
+            moved_path = shutil.move(str(source), str(destination))
+        except (OSError, shutil.Error) as exc:
+            self.logger.error("Move failed for %s -> %s: %s", source, destination, exc)
+            raise RuntimeError(f"Unable to move file: {exc}") from exc
+
+        moved_path = str(Path(moved_path))
+        if not self.db_manager.update_image_path(str(source), moved_path):
+            try:
+                shutil.move(moved_path, str(source))
+            except (OSError, shutil.Error) as rollback_exc:
+                self.logger.error(
+                    "Database path update failed and rollback also failed for %s: %s",
+                    moved_path,
+                    rollback_exc,
+                )
+            raise RuntimeError("Move succeeded on disk, but the database update failed.")
+
+        self.logger.info("Moved image %s -> %s", source, moved_path)
+        return moved_path
+
+    def delete_image(self, file_path: str) -> None:
+        """Delete an image file from disk and remove its metadata entry."""
+        source = Path(file_path)
+        if not source.exists():
+            raise FileNotFoundError(f"File not found: {file_path}")
+
+        try:
+            os.remove(source)
+        except OSError as exc:
+            self.logger.error("Delete failed for %s: %s", source, exc)
+            raise RuntimeError(f"Unable to delete file: {exc}") from exc
+
+        if not self.db_manager.delete_image(str(source)):
+            raise RuntimeError("File deleted from disk, but the database cleanup failed.")
+
+        self.logger.info("Deleted image %s", source)
 
 
 class ImageHandler:

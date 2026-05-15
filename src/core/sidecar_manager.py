@@ -10,17 +10,18 @@ import threading
 import sys
 import time
 from pathlib import Path
-from typing import Dict, Any, Optional, List, Set
+from typing import Dict, Any, Optional, List, Set, Callable
 from core.database import DatabaseManager, ImageMetadata
 from core.story_engine import StoryEngine
 
 class SidecarManager:
     """Manages the life cycle and IPC of the Electron sidecar."""
 
-    def __init__(self, db_manager: DatabaseManager, config: Dict[str, Any]):
+    def __init__(self, db_manager: DatabaseManager, config: Dict[str, Any], event_callback: Optional[Callable[[Dict[str, Any]], None]] = None):
         self.db_manager = db_manager
         self.config = config
         self.logger = logging.getLogger(__name__)
+        self.event_callback = event_callback
         self.process: Optional[subprocess.Popen] = None
         self.story_engine = StoryEngine(config)
         self.current_metadata: Optional[ImageMetadata] = None
@@ -44,6 +45,15 @@ class SidecarManager:
         self.story_quick_mode_enabled = bool(
             config.get("providers", {}).get("ollama", {}).get("story_quick_mode_enabled", True)
         )
+
+    def _emit_event(self, source: str, message: str, event_type: str = "status") -> None:
+        """Publish sidecar activity to an optional UI callback."""
+        if not self.event_callback or not message:
+            return
+        try:
+            self.event_callback({"source": source, "message": message, "type": event_type})
+        except Exception as exc:
+            self.logger.debug("Sidecar event callback failed: %s", exc)
 
     def is_alive(self) -> bool:
         """Check if the sidecar process is still running."""
@@ -187,6 +197,8 @@ class SidecarManager:
             outbound.get("_bridge_id"),
             outbound.get("type"),
         )
+        if outbound.get("type") == "status":
+            self._emit_event("dolphin3:8b", outbound.get("message", ""), "status")
 
         if self.is_alive() and self.process.stdin:
             try:
@@ -285,6 +297,9 @@ class SidecarManager:
             bridge_id,
             message.get("type"),
         )
+        inbound_type = message.get("type", "")
+        inbound_summary = message.get("message") or message.get("hook") or inbound_type
+        self._emit_event("electron", str(inbound_summary), inbound_type or "ipc")
         self._handle_sidecar_message(message)
 
     def _handle_sidecar_message(self, message: Dict[str, Any]):

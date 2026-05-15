@@ -300,12 +300,59 @@ class DatabaseManager:
         """Delete image metadata from database."""
         try:
             with sqlite3.connect(self.db_path) as conn:
+                conn.execute('DELETE FROM image_stories WHERE image_file_path = ?', (file_path,))
                 cursor = conn.execute('DELETE FROM images WHERE file_path = ?', (file_path,))
                 conn.commit()
                 return cursor.rowcount > 0
         except sqlite3.Error as e:
             self.logger.error(f"Error deleting image {file_path}: {e}")
             return False
+
+    def update_image_path(self, old_path: str, new_path: str) -> bool:
+        """Update the stored file path after a rename or move."""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                filename = Path(new_path).name
+                image_cursor = conn.execute(
+                    '''
+                    UPDATE images
+                    SET file_path = ?, filename = ?, modified_date = CURRENT_TIMESTAMP
+                    WHERE file_path = ?
+                    ''',
+                    (new_path, filename, old_path),
+                )
+                conn.execute(
+                    'UPDATE image_stories SET image_file_path = ? WHERE image_file_path = ?',
+                    (new_path, old_path),
+                )
+                conn.commit()
+                return image_cursor.rowcount > 0
+        except sqlite3.Error as e:
+            self.logger.error(f"Error updating image path {old_path} -> {new_path}: {e}")
+            return False
+
+    def remove_missing_files(self) -> List[str]:
+        """Delete database rows for files that no longer exist on disk."""
+        missing_paths: List[str] = []
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.execute('SELECT file_path FROM images')
+                stored_paths = [row[0] for row in cursor.fetchall()]
+
+                missing_paths = [path for path in stored_paths if not Path(path).exists()]
+                if not missing_paths:
+                    return []
+
+                for path in missing_paths:
+                    conn.execute('DELETE FROM image_stories WHERE image_file_path = ?', (path,))
+                    conn.execute('DELETE FROM images WHERE file_path = ?', (path,))
+
+                conn.commit()
+                self.logger.info("Removed %s missing file entries from database", len(missing_paths))
+                return missing_paths
+        except sqlite3.Error as e:
+            self.logger.error(f"Error removing missing file entries: {e}")
+            return []
 
     def save_story(self, image_file_path: str, hook: str, story: str, mode: str) -> bool:
         """Save a generated story to the database."""

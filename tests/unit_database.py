@@ -102,3 +102,50 @@ def test_save_and_get_stories(tmp_path):
     assert stories[0]["selected_hook"] == "Hook A"
     assert stories[0]["full_story"] == "Story body"
     assert stories[0]["mode"] == "Chaos/Complex"
+
+
+def test_update_image_path_updates_images_and_stories(tmp_path):
+    db_path = tmp_path / "paths.db"
+    handler = ImageHandler()
+    db = DatabaseManager(str(db_path))
+
+    image_path = _create_test_image(tmp_path / "before.png")
+    metadata = handler.create_metadata(str(image_path))
+    assert metadata is not None
+    assert db.add_image(metadata) is True
+    assert db.save_story(metadata.file_path, "Hook", "Story", "Simple") is True
+
+    renamed_path = str(tmp_path / "after.png")
+    assert db.update_image_path(metadata.file_path, renamed_path) is True
+
+    assert db.get_image(metadata.file_path) is None
+    moved_metadata = db.get_image(renamed_path)
+    assert moved_metadata is not None
+    assert moved_metadata.filename == "after.png"
+
+    stories = db.get_stories(renamed_path)
+    assert len(stories) == 1
+    assert stories[0]["image_file_path"] == renamed_path
+
+
+def test_remove_missing_files_cleans_database(tmp_path):
+    db_path = tmp_path / "missing.db"
+    handler = ImageHandler()
+    db = DatabaseManager(str(db_path))
+
+    existing_path = _create_test_image(tmp_path / "keep.png")
+    missing_path = _create_test_image(tmp_path / "gone.png")
+
+    existing_metadata = handler.create_metadata(str(existing_path))
+    missing_metadata = handler.create_metadata(str(missing_path))
+    assert existing_metadata is not None
+    assert missing_metadata is not None
+    assert db.add_image(existing_metadata) is True
+    assert db.add_image(missing_metadata) is True
+
+    missing_path.unlink()
+
+    removed_paths = db.remove_missing_files()
+    assert removed_paths == [str(missing_path)]
+    assert db.get_image(str(missing_path)) is None
+    assert db.get_image(str(existing_path)) is not None

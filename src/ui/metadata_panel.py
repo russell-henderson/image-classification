@@ -8,7 +8,7 @@ import logging
 import os
 import threading
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, filedialog, simpledialog
 from typing import Optional, Callable, Dict, Any, List
 from datetime import datetime
 
@@ -35,12 +35,14 @@ class MetadataPanel(tk.Frame):
     STATUS_FAILED = "failed"
     
     def __init__(self, parent, classifier: ClassificationEngine, db_manager: DatabaseManager,
-                 on_metadata_change: Optional[Callable[[str, str, Any], None]] = None):
+                 on_metadata_change: Optional[Callable[[str, str, Any], None]] = None,
+                 on_file_request: Optional[Callable[..., Dict[str, Any]]] = None):
         super().__init__(parent)
         
         self.classifier = classifier
         self.db_manager = db_manager
         self.on_metadata_change = on_metadata_change
+        self.on_file_request = on_file_request
         self.logger = logging.getLogger(__name__)
         
         # Current metadata
@@ -54,6 +56,13 @@ class MetadataPanel(tk.Frame):
         self.categories_var = tk.StringVar()
         self.story_complexity_var = tk.StringVar(value="Simple")
         self.story_chaos_var = tk.BooleanVar(value=False)
+        self.preview_lightbox_window = None
+        self.preview_lightbox_label = None
+        self.preview_lightbox_source = None
+        self.preview_lightbox_image = None
+        self._delete_dialog = None
+        self.realtime_log_lines: List[str] = []
+        self.saved_stories_expanded = False
         
         # Bind change events
         self.rating_var.trace('w', self._on_rating_change)
@@ -66,39 +75,355 @@ class MetadataPanel(tk.Frame):
     
     def _setup_ui(self):
         """Setup the user interface."""
+        self.configure(bg="#eef1f4")
         self.grid_columnconfigure(0, weight=1)
-        
-        # Create scrollable frame
-        canvas = tk.Canvas(self)
-        scrollbar = ttk.Scrollbar(self, orient="vertical", command=canvas.yview)
-        scrollable_frame = tk.Frame(canvas)
-        
-        scrollable_frame.bind(
-            "<Configure>",
-            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
-        )
-        
-        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
-        canvas.configure(yscrollcommand=scrollbar.set)
-        
-        # Pack scrolling components
-        canvas.pack(side="left", fill="both", expand=True)
-        scrollbar.pack(side="right", fill="y")
-        
-        # Main content frame
-        self.content_frame = scrollable_frame
+        self.grid_rowconfigure(0, weight=1)
+
+        self.content_frame = tk.Frame(self, bg="#eef1f4")
+        self.content_frame.grid(row=0, column=0, sticky="nsew")
         self.content_frame.grid_columnconfigure(0, weight=1)
-        
-        # Create sections
-        self._create_preview_section()
-        self._create_basic_info_section()
-        self._create_rating_section()
-        self._create_description_section()
-        self._create_tags_section()
-        self._create_classification_section()
-        self._create_story_history_section()
-        self._create_technical_info_section()
-        self._create_action_buttons()
+        self.content_frame.grid_rowconfigure(2, weight=1)
+        self.content_frame.grid_rowconfigure(4, weight=1)
+
+        self._build_dashboard()
+
+    def _build_dashboard(self):
+        """Create the fixed-height dashboard layout."""
+        top_panel = self._make_panel(self.content_frame, row=0, title="Preview & Status")
+        top_panel.grid_columnconfigure(0, weight=1, uniform="top")
+        top_panel.grid_columnconfigure(1, weight=1, uniform="top")
+        top_panel.grid_rowconfigure(0, weight=1)
+
+        self._build_status_panel(top_panel)
+        self._build_preview_panel(top_panel)
+
+        action_panel = self._make_panel(self.content_frame, row=1, title="Actions")
+        action_panel.grid_columnconfigure(0, weight=1)
+        self._build_action_panel(action_panel)
+
+        results_panel = self._make_panel(self.content_frame, row=2, title="Classification Results", sticky="nsew")
+        results_panel.grid_columnconfigure(0, weight=1)
+        results_panel.grid_rowconfigure(1, weight=1)
+        self._build_results_panel(results_panel)
+
+        story_panel = self._make_panel(self.content_frame, row=3, title="Saved Stories")
+        story_panel.grid_columnconfigure(0, weight=1)
+        self._build_story_panel(story_panel)
+
+        footer = tk.Frame(self.content_frame, bg="#eef1f4")
+        footer.grid(row=4, column=0, sticky="nsew", padx=10, pady=(0, 10))
+        footer.grid_columnconfigure(0, weight=1, uniform="footer")
+        footer.grid_columnconfigure(1, weight=1, uniform="footer")
+        footer.grid_rowconfigure(0, weight=1)
+
+        basic_panel = self._make_panel(footer, row=0, title="Basic Information", column=0, sticky="nsew", padx=(0, 5), pady=0)
+        basic_panel.grid_columnconfigure(1, weight=1)
+        self._build_basic_info_panel(basic_panel)
+
+        tech_panel = self._make_panel(footer, row=0, title="Technical Information", column=1, sticky="nsew", padx=(5, 0), pady=0)
+        tech_panel.grid_columnconfigure(0, weight=1)
+        tech_panel.grid_rowconfigure(0, weight=1)
+        self._build_technical_panel(tech_panel)
+
+    def _make_panel(self, parent, row: int, title: str, column: int = 0, sticky: str = "ew", padx=10, pady=(10, 0)):
+        """Create a labeled panel with consistent spacing."""
+        panel = tk.LabelFrame(
+            parent,
+            text=title,
+            font=("Arial", 10, "bold"),
+            bg="white",
+            fg="#1f2933",
+            bd=1,
+            relief=tk.GROOVE,
+            padx=10,
+            pady=10,
+        )
+        panel.grid(row=row, column=column, sticky=sticky, padx=padx, pady=pady)
+        return panel
+
+    def _make_entry(self, parent, variable) -> tk.Entry:
+        """Create a standard entry widget."""
+        return tk.Entry(parent, textvariable=variable, font=("Arial", 9), relief=tk.SOLID, bd=1)
+
+    def _build_status_panel(self, parent):
+        """Build the left-side status and live log area."""
+        status_frame = tk.Frame(parent, bg="white")
+        status_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 5))
+        status_frame.grid_columnconfigure(0, weight=1)
+
+        tk.Label(
+            status_frame,
+            text="Classification Status",
+            font=("Arial", 10, "bold"),
+            bg="white",
+            anchor="w",
+        ).grid(row=0, column=0, sticky="ew", pady=(0, 8))
+
+        self.status_steps = {}
+        for idx, (key, label_text) in enumerate((
+            ("received", "1. Command received"),
+            ("working", "2. Running LLaVA"),
+            ("completed", "3. Completed"),
+        ), start=1):
+            row_frame = tk.Frame(status_frame, bg="white")
+            row_frame.grid(row=idx, column=0, sticky="ew", pady=3)
+            row_frame.grid_columnconfigure(1, weight=1)
+
+            indicator = tk.Label(row_frame, width=2, height=1, bg="#d9d9d9", relief=tk.FLAT)
+            indicator.grid(row=0, column=0, sticky="w")
+            label = tk.Label(row_frame, text=label_text, font=("Arial", 9), bg="white", fg="#666666", anchor="w")
+            label.grid(row=0, column=1, sticky="ew", padx=(8, 0))
+            self.status_steps[key] = (indicator, label)
+
+        self.status_message_label = tk.Label(
+            status_frame,
+            text="Waiting for a classification request.",
+            font=("Arial", 8),
+            bg="white",
+            fg="#666666",
+            anchor="w",
+            justify=tk.LEFT,
+            wraplength=240,
+        )
+        self.status_message_label.grid(row=4, column=0, sticky="ew", pady=(8, 10))
+
+        tk.Label(
+            status_frame,
+            text="Real-time Log",
+            font=("Arial", 9, "bold"),
+            bg="white",
+            anchor="w",
+        ).grid(row=5, column=0, sticky="ew", pady=(0, 4))
+
+        self.realtime_log_text = tk.Text(
+            status_frame,
+            height=3,
+            wrap=tk.WORD,
+            font=("Consolas", 8),
+            relief=tk.SOLID,
+            bd=1,
+            state=tk.DISABLED,
+        )
+        self.realtime_log_text.grid(row=6, column=0, sticky="ew")
+
+    def _build_preview_panel(self, parent):
+        """Build the top-right image preview panel."""
+        self.preview_container = tk.Frame(parent, bg="white", height=280)
+        self.preview_container.grid(row=0, column=1, sticky="nsew", padx=(5, 0))
+        self.preview_container.grid_columnconfigure(0, weight=1)
+        self.preview_container.grid_rowconfigure(0, weight=1)
+        self.preview_container.grid_propagate(False)
+
+        self.preview_label = tk.Label(
+            self.preview_container,
+            text="No image selected",
+            bg="white",
+            fg="gray",
+        )
+        self.preview_label.grid(row=0, column=0, sticky="nsew")
+        self.preview_label.bind("<Double-Button-1>", self._open_preview_lightbox)
+
+        self._set_classification_status(self.STATUS_IDLE)
+
+    def _build_action_panel(self, parent):
+        """Build the primary action row and story controls."""
+        button_row = tk.Frame(parent, bg="white")
+        button_row.grid(row=0, column=0, sticky="ew")
+
+        tk.Button(button_row, text="Classify", command=self._classify_current_image).pack(side=tk.LEFT, padx=(0, 6))
+        tk.Button(button_row, text="Clear", command=self._clear_classification).pack(side=tk.LEFT, padx=6)
+        tk.Button(button_row, text="Create", command=self._launch_sidecar).pack(side=tk.LEFT, padx=6)
+        tk.Button(button_row, text="Save", command=self._save_changes, bg="#1f6feb", fg="white").pack(side=tk.LEFT, padx=6)
+        tk.Button(button_row, text="Delete", command=self._confirm_delete_current_image, bg="#c0392b", fg="white").pack(side=tk.LEFT, padx=6)
+
+        story_row = tk.Frame(parent, bg="white")
+        story_row.grid(row=1, column=0, sticky="ew", pady=(10, 0))
+        story_row.grid_columnconfigure(5, weight=1)
+
+        tk.Label(story_row, text="Story Mode", font=("Arial", 9, "bold"), bg="white").grid(row=0, column=0, sticky="w", padx=(0, 6))
+        tk.Checkbutton(
+            story_row,
+            text="Chaos / Spicy",
+            variable=self.story_chaos_var,
+            onvalue=True,
+            offvalue=False,
+            bg="white",
+        ).grid(row=0, column=1, sticky="w", padx=(0, 12))
+        tk.Label(story_row, text="Complexity", font=("Arial", 9, "bold"), bg="white").grid(row=0, column=2, sticky="w", padx=(0, 6))
+        self.story_complexity_combo = ttk.Combobox(
+            story_row,
+            textvariable=self.story_complexity_var,
+            values=["Simple", "Complex"],
+            state="readonly",
+            width=10,
+        )
+        self.story_complexity_combo.grid(row=0, column=3, sticky="w")
+
+    def _build_results_panel(self, parent):
+        """Build the classification results area."""
+        tk.Label(parent, text="Description", font=("Arial", 9, "bold"), bg="white").grid(row=0, column=0, sticky="w")
+
+        desc_frame = tk.Frame(parent, bg="white")
+        desc_frame.grid(row=1, column=0, sticky="nsew", pady=(4, 10))
+        desc_frame.grid_columnconfigure(0, weight=1)
+        desc_frame.grid_rowconfigure(0, weight=1)
+        self.description_text = tk.Text(desc_frame, height=4, wrap=tk.WORD, font=("Arial", 9), relief=tk.SOLID, bd=1)
+        desc_scrollbar = ttk.Scrollbar(desc_frame, orient="vertical", command=self.description_text.yview)
+        self.description_text.configure(yscrollcommand=desc_scrollbar.set)
+        self.description_text.grid(row=0, column=0, sticky="nsew")
+        desc_scrollbar.grid(row=0, column=1, sticky="ns")
+        self.description_text.bind('<KeyRelease>', self._on_description_text_change)
+
+        meta_grid = tk.Frame(parent, bg="white")
+        meta_grid.grid(row=2, column=0, sticky="ew", pady=(0, 10))
+        meta_grid.grid_columnconfigure(1, weight=1, uniform="meta")
+        meta_grid.grid_columnconfigure(3, weight=1, uniform="meta")
+
+        tk.Label(meta_grid, text="Tags", font=("Arial", 9, "bold"), bg="white").grid(row=0, column=0, sticky="w", padx=(0, 6), pady=4)
+        self.tags_entry = self._make_entry(meta_grid, self.tags_var)
+        self.tags_entry.grid(row=0, column=1, sticky="ew", pady=4)
+
+        tk.Label(meta_grid, text="Keywords", font=("Arial", 9, "bold"), bg="white").grid(row=0, column=2, sticky="w", padx=(12, 6), pady=4)
+        self.keywords_entry = self._make_entry(meta_grid, self.keywords_var)
+        self.keywords_entry.grid(row=0, column=3, sticky="ew", pady=4)
+
+        tk.Label(meta_grid, text="Categories", font=("Arial", 9, "bold"), bg="white").grid(row=1, column=0, sticky="w", padx=(0, 6), pady=4)
+        self.categories_entry = self._make_entry(meta_grid, self.categories_var)
+        self.categories_entry.grid(row=1, column=1, sticky="ew", pady=4)
+
+        tk.Label(meta_grid, text="Rating", font=("Arial", 9, "bold"), bg="white").grid(row=1, column=2, sticky="w", padx=(12, 6), pady=4)
+        rating_frame = tk.Frame(meta_grid, bg="white")
+        rating_frame.grid(row=1, column=3, sticky="w", pady=4)
+        self.star_buttons = []
+        for i in range(1, 6):
+            btn = tk.Button(
+                rating_frame,
+                text="☆",
+                font=("Arial", 14),
+                command=lambda r=i: self._set_rating(r),
+                relief=tk.FLAT,
+                borderwidth=0,
+                bg="white",
+            )
+            btn.pack(side=tk.LEFT, padx=1)
+            self.star_buttons.append(btn)
+        tk.Button(rating_frame, text="Clear", command=lambda: self._set_rating(0)).pack(side=tk.LEFT, padx=(8, 0))
+
+        tk.Label(parent, text="AI Output", font=("Arial", 9, "bold"), bg="white").grid(row=3, column=0, sticky="w")
+        ai_frame = tk.Frame(parent, bg="white")
+        ai_frame.grid(row=4, column=0, sticky="nsew", pady=(4, 0))
+        ai_frame.grid_columnconfigure(0, weight=1)
+        ai_frame.grid_rowconfigure(0, weight=1)
+        self.classification_text = tk.Text(ai_frame, height=8, wrap=tk.WORD, font=("Arial", 9), state=tk.DISABLED, relief=tk.SOLID, bd=1)
+        class_scrollbar = ttk.Scrollbar(ai_frame, orient="vertical", command=self.classification_text.yview)
+        self.classification_text.configure(yscrollcommand=class_scrollbar.set)
+        self.classification_text.grid(row=0, column=0, sticky="nsew")
+        class_scrollbar.grid(row=0, column=1, sticky="ns")
+
+    def _build_story_panel(self, parent):
+        """Build the collapsible saved stories panel."""
+        self.story_toggle_button = tk.Button(
+            parent,
+            text="Show Saved Stories",
+            command=self._toggle_saved_stories,
+            anchor="w",
+        )
+        self.story_toggle_button.grid(row=0, column=0, sticky="ew")
+
+        self.story_body = tk.Frame(parent, bg="white")
+        self.story_body.grid(row=1, column=0, sticky="ew", pady=(10, 0))
+        self.story_body.grid_columnconfigure(0, weight=1)
+
+        self.story_listbox = tk.Listbox(self.story_body, height=4, exportselection=False)
+        self.story_listbox.grid(row=0, column=0, sticky="ew", pady=(0, 6))
+        self.story_listbox.bind("<<ListboxSelect>>", self._on_story_select)
+
+        preview_frame = tk.Frame(self.story_body, bg="white")
+        preview_frame.grid(row=1, column=0, sticky="ew")
+        preview_frame.grid_columnconfigure(0, weight=1)
+        self.story_preview_text = tk.Text(preview_frame, height=5, wrap=tk.WORD, font=("Arial", 9), state=tk.DISABLED, relief=tk.SOLID, bd=1)
+        story_preview_scrollbar = ttk.Scrollbar(preview_frame, orient="vertical", command=self.story_preview_text.yview)
+        self.story_preview_text.configure(yscrollcommand=story_preview_scrollbar.set)
+        self.story_preview_text.grid(row=0, column=0, sticky="ew")
+        story_preview_scrollbar.grid(row=0, column=1, sticky="ns")
+
+        story_btn_frame = tk.Frame(self.story_body, bg="white")
+        story_btn_frame.grid(row=2, column=0, sticky="ew", pady=(8, 0))
+        tk.Button(story_btn_frame, text="Refresh Stories", command=self._refresh_story_history).pack(side=tk.LEFT, padx=(0, 5))
+        tk.Button(story_btn_frame, text="Copy Story", command=self._copy_selected_story).pack(side=tk.LEFT, padx=5)
+
+        self.story_records: List[Dict[str, Any]] = []
+        self._toggle_saved_stories(force=False)
+
+    def _build_basic_info_panel(self, parent):
+        """Build the lower-left reference information panel."""
+        self.info_labels = {}
+        info_fields = [
+            ("Filename", "filename"),
+            ("Size", "size"),
+            ("Dimensions", "dimensions"),
+            ("Format", "format"),
+            ("Created", "created"),
+            ("Modified", "modified"),
+        ]
+        for row_index, (label_text, field_name) in enumerate(info_fields):
+            tk.Label(parent, text=f"{label_text}:", font=("Arial", 9, "bold"), bg="white").grid(
+                row=row_index, column=0, sticky="nw", padx=(0, 6), pady=2
+            )
+            label = tk.Label(parent, text="", font=("Arial", 9), bg="white", anchor="w", justify=tk.LEFT, wraplength=260)
+            label.grid(row=row_index, column=1, sticky="ew", pady=2)
+            self.info_labels[field_name] = label
+
+        file_button_frame = tk.Frame(parent, bg="white")
+        file_button_frame.grid(row=len(info_fields), column=0, columnspan=2, sticky="w", pady=(10, 0))
+        tk.Button(file_button_frame, text="Rename", command=self._rename_current_image).pack(side=tk.LEFT)
+
+    def _build_technical_panel(self, parent):
+        """Build the lower-right technical metadata panel."""
+        exif_frame = tk.Frame(parent, bg="white")
+        exif_frame.grid(row=0, column=0, sticky="nsew")
+        exif_frame.grid_columnconfigure(0, weight=1)
+        exif_frame.grid_rowconfigure(0, weight=1)
+
+        self.exif_text = tk.Text(exif_frame, height=10, wrap=tk.WORD, font=("Courier", 8), state=tk.DISABLED, relief=tk.SOLID, bd=1)
+        exif_scrollbar = ttk.Scrollbar(exif_frame, orient="vertical", command=self.exif_text.yview)
+        self.exif_text.configure(yscrollcommand=exif_scrollbar.set)
+        self.exif_text.grid(row=0, column=0, sticky="nsew")
+        exif_scrollbar.grid(row=0, column=1, sticky="ns")
+
+        tech_button_frame = tk.Frame(parent, bg="white")
+        tech_button_frame.grid(row=1, column=0, sticky="w", pady=(10, 0))
+        tk.Button(tech_button_frame, text="Move to Folder", command=self._move_current_image).pack(side=tk.LEFT)
+
+    def _toggle_saved_stories(self, force: Optional[bool] = None):
+        """Expand or collapse the saved stories section."""
+        self.saved_stories_expanded = (not self.saved_stories_expanded) if force is None else force
+        if self.saved_stories_expanded:
+            self.story_body.grid()
+            self.story_toggle_button.config(text="Hide Saved Stories")
+        else:
+            self.story_body.grid_remove()
+            self.story_toggle_button.config(text="Show Saved Stories")
+
+    def _append_realtime_log(self, message: str):
+        """Append a short line to the three-line realtime console."""
+        if not message:
+            return
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        self.realtime_log_lines.append(f"[{timestamp}] {message}")
+        self.realtime_log_lines = self.realtime_log_lines[-3:]
+        self.realtime_log_text.configure(state="normal")
+        self.realtime_log_text.delete("1.0", "end")
+        self.realtime_log_text.insert("1.0", "\n".join(self.realtime_log_lines))
+        self.realtime_log_text.configure(state="disabled")
+
+    def _handle_sidecar_event(self, event: Dict[str, Any]):
+        """Receive sidecar status events and mirror them into the live log."""
+        message = event.get("message", "").strip()
+        if not message:
+            return
+        source = event.get("source", "bridge")
+        self.after(0, lambda: self._append_realtime_log(f"{source}: {message}"))
     
     def _create_section_header(self, parent, text: str, row: int) -> int:
         """Create a section header and return the next row."""
@@ -184,9 +509,23 @@ class MetadataPanel(tk.Frame):
         )
         self.status_message_label.grid(row=4, column=0, sticky="ew", pady=(10, 0))
 
+        top_button_frame = tk.Frame(status_frame, bg="white")
+        top_button_frame.grid(row=5, column=0, sticky="w", pady=(18, 0))
+        tk.Button(
+            top_button_frame,
+            text="Classify Image",
+            command=self._classify_current_image,
+        ).pack(side=tk.LEFT, padx=(0, 8))
+        tk.Button(
+            top_button_frame,
+            text="Clear Classification",
+            command=self._clear_classification,
+        ).pack(side=tk.LEFT)
+
         self.preview_label = tk.Label(self.preview_container, text="No image selected", 
                                      bg="white", fg="gray")
         self.preview_label.grid(row=0, column=1, sticky="nsew")
+        self.preview_label.bind("<Double-Button-1>", self._open_preview_lightbox)
 
         self._set_classification_status(self.STATUS_IDLE)
         
@@ -239,6 +578,7 @@ class MetadataPanel(tk.Frame):
     def _handle_classifier_status(self, stage: str, detail: str) -> None:
         """Receive classifier progress updates from the worker thread."""
         self.after(0, lambda: self._set_classification_status(stage, detail))
+        self.after(0, lambda: self._append_realtime_log(f"llava:latest: {detail}"))
     
     def _create_basic_info_section(self):
         """Create basic information section."""
@@ -266,6 +606,14 @@ class MetadataPanel(tk.Frame):
             label = tk.Label(info_frame, text="", font=("Arial", 9), anchor="w")
             label.grid(row=i, column=1, sticky="ew", padx=5, pady=2)
             self.info_labels[field_name] = label
+
+        file_button_frame = tk.Frame(info_frame)
+        file_button_frame.grid(row=len(info_fields), column=0, columnspan=2, sticky="w", padx=5, pady=(8, 0))
+        tk.Button(
+            file_button_frame,
+            text="Rename",
+            command=self._rename_current_image,
+        ).pack(side=tk.LEFT, padx=(0, 8))
         
         self.current_row = row + 1
     
@@ -368,10 +716,6 @@ class MetadataPanel(tk.Frame):
         btn_frame = tk.Frame(class_frame)
         btn_frame.grid(row=1, column=0, sticky="ew", pady=5)
         
-        tk.Button(btn_frame, text="Classify Image", 
-                 command=self._classify_current_image).pack(side=tk.LEFT, padx=5)
-        tk.Button(btn_frame, text="Clear Classification", 
-                 command=self._clear_classification).pack(side=tk.LEFT, padx=5)
         tk.Button(btn_frame, text="Create", 
                  command=self._launch_sidecar).pack(side=tk.LEFT, padx=5)
 
@@ -428,6 +772,14 @@ class MetadataPanel(tk.Frame):
         
         self.exif_text.grid(row=0, column=0, sticky="ew", pady=2)
         exif_scrollbar.grid(row=0, column=1, sticky="ns")
+
+        tech_button_frame = tk.Frame(tech_frame)
+        tech_button_frame.grid(row=1, column=0, sticky="w", pady=(8, 0))
+        tk.Button(
+            tech_button_frame,
+            text="Move to Folder",
+            command=self._move_current_image,
+        ).pack(side=tk.LEFT)
         
         self.current_row = row + 1
 
@@ -482,9 +834,45 @@ class MetadataPanel(tk.Frame):
         btn_frame = tk.Frame(self.content_frame)
         btn_frame.grid(row=row, column=0, sticky="ew", padx=5, pady=5)
         
-        tk.Button(btn_frame, text="Save Changes", command=self._save_changes).pack(side=tk.LEFT, padx=5)
+        tk.Button(
+            btn_frame,
+            text="Save",
+            command=self._save_changes,
+            bg="#1f6feb",
+            fg="white",
+        ).pack(side=tk.LEFT, padx=5)
+        tk.Button(
+            btn_frame,
+            text="Delete",
+            command=self._confirm_delete_current_image,
+            bg="#c0392b",
+            fg="white",
+        ).pack(side=tk.LEFT, padx=5)
         tk.Button(btn_frame, text="Revert Changes", command=self._revert_changes).pack(side=tk.LEFT, padx=5)
         tk.Button(btn_frame, text="Export Metadata", command=self._export_metadata).pack(side=tk.LEFT, padx=5)
+
+    def clear_metadata(self):
+        """Clear the panel after file removal or when no selection remains."""
+        self.current_metadata = None
+        self.preview_label.config(image="", text="No image selected")
+        self.preview_label.image = None
+        for label in self.info_labels.values():
+            label.config(text="")
+        self.rating_var.set(0)
+        self._update_star_display()
+        self.description_text.delete(1.0, tk.END)
+        for entry in (self.tags_entry, self.keywords_entry, self.categories_entry):
+            entry.delete(0, tk.END)
+        self.classification_text.configure(state="normal")
+        self.classification_text.delete("1.0", "end")
+        self.classification_text.insert("1.0", "(No AI output stored)")
+        self.classification_text.configure(state="disabled")
+        self._set_exif_text("No file selected")
+        self.story_listbox.config(state=tk.NORMAL)
+        self.story_listbox.delete(0, tk.END)
+        self.story_records = []
+        self._set_story_preview_text("")
+        self._set_classification_status(self.STATUS_IDLE)
     
     def load_metadata(self, metadata: ImageMetadata):
         """Load metadata into the panel."""
@@ -575,6 +963,75 @@ class MetadataPanel(tk.Frame):
         self.story_preview_text.delete("1.0", "end")
         self.story_preview_text.insert("1.0", text or "")
         self.story_preview_text.configure(state="disabled")
+
+    def _open_preview_lightbox(self, _event=None):
+        """Open the right-panel preview image in a larger lightbox."""
+        image_path = getattr(self.current_metadata, "file_path", None)
+        if not image_path:
+            return
+
+        try:
+            image = Image.open(image_path)
+            image.load()
+        except Exception as e:
+            self.logger.error(f"Error opening preview lightbox {image_path}: {e}")
+            messagebox.showerror("Preview Error", f"Unable to open image preview: {e}")
+            return
+
+        if self.preview_lightbox_window and self.preview_lightbox_window.winfo_exists():
+            self.preview_lightbox_window.destroy()
+
+        self.preview_lightbox_source = image
+        self.preview_lightbox_window = tk.Toplevel(self)
+        self.preview_lightbox_window.title(self.current_metadata.filename)
+        self.preview_lightbox_window.configure(bg="black")
+        self.preview_lightbox_window.geometry("1280x860")
+        self.preview_lightbox_window.minsize(640, 480)
+        self.preview_lightbox_window.transient(self.winfo_toplevel())
+        self.preview_lightbox_window.bind("<Escape>", lambda _e: self._close_preview_lightbox())
+        self.preview_lightbox_window.bind("<Configure>", self._on_preview_lightbox_resize)
+
+        self.preview_lightbox_label = tk.Label(self.preview_lightbox_window, bg="black")
+        self.preview_lightbox_label.pack(fill="both", expand=True, padx=20, pady=(20, 8))
+        self.preview_lightbox_label.bind("<Button-1>", lambda _e: self._close_preview_lightbox())
+
+        caption = tk.Label(
+            self.preview_lightbox_window,
+            text=f"{self.current_metadata.filename}  |  Esc or click image to close",
+            bg="black",
+            fg="white",
+            font=("Arial", 10),
+        )
+        caption.pack(fill="x", padx=20, pady=(0, 16))
+
+        self._render_preview_lightbox()
+
+    def _render_preview_lightbox(self):
+        if not self.preview_lightbox_window or not self.preview_lightbox_source:
+            return
+        if not self.preview_lightbox_window.winfo_exists():
+            return
+
+        self.preview_lightbox_window.update_idletasks()
+        max_w = max(200, self.preview_lightbox_window.winfo_width() - 80)
+        max_h = max(200, self.preview_lightbox_window.winfo_height() - 120)
+
+        img = self.preview_lightbox_source.copy()
+        img.thumbnail((max_w, max_h), Image.Resampling.LANCZOS)
+        self.preview_lightbox_image = ImageTk.PhotoImage(img)
+        self.preview_lightbox_label.config(image=self.preview_lightbox_image)
+
+    def _on_preview_lightbox_resize(self, event):
+        if event.widget is self.preview_lightbox_window:
+            self.after(10, self._render_preview_lightbox)
+
+    def _close_preview_lightbox(self):
+        if self.preview_lightbox_window and self.preview_lightbox_window.winfo_exists():
+            self.preview_lightbox_window.destroy()
+        self.preview_lightbox_window = None
+        self.preview_lightbox_label = None
+        self.preview_lightbox_source = None
+        self.preview_lightbox_image = None
 
     def _refresh_story_history(self) -> None:
         """Reload saved stories for the selected image."""
@@ -717,8 +1174,8 @@ class MetadataPanel(tk.Frame):
             
             # Calculate dynamic size based on container
             self.update_idletasks()
-            container_width = self.preview_container.winfo_width() - 170 - 40 # space for status and padding
-            container_height = self.preview_container.winfo_height() - 20
+            container_width = self.preview_container.winfo_width() - 24
+            container_height = self.preview_container.winfo_height() - 24
             
             # Target size: max-height 40% of panel or use container's current size
             # The panel's total height isn't easily known here, so we'll use the container's 
@@ -895,8 +1352,13 @@ class MetadataPanel(tk.Frame):
         try:
             from core.sidecar_manager import SidecarManager
             if not hasattr(self, 'sidecar_manager') or not self.sidecar_manager.is_alive():
-                self.sidecar_manager = SidecarManager(self.db_manager, self.classifier.config)
+                self.sidecar_manager = SidecarManager(
+                    self.db_manager,
+                    self.classifier.config,
+                    event_callback=self._handle_sidecar_event,
+                )
             
+            self._append_realtime_log("bridge: sending description and tags to Electron")
             self.sidecar_manager.launch(self.current_metadata, description, tags, complexity, is_chaos)
         except Exception as e:
             self.logger.error(f"Failed to launch sidecar: {e}")
@@ -1022,6 +1484,86 @@ class MetadataPanel(tk.Frame):
         except Exception as e:
             self.logger.error(f"Error saving changes: {e}")
             messagebox.showerror("Error", f"Error saving changes: {e}")
+
+    def _rename_current_image(self):
+        """Rename the currently selected image."""
+        if not self.current_metadata:
+            messagebox.showwarning("Rename Image", "No image is selected.")
+            return
+
+        new_name = simpledialog.askstring(
+            "Rename Image",
+            "Enter the new filename:",
+            initialvalue=self.current_metadata.filename,
+            parent=self,
+        )
+        if new_name is None:
+            return
+
+        self._run_file_request("rename", self.current_metadata.file_path, new_name=new_name)
+
+    def _move_current_image(self):
+        """Move the currently selected image to another folder."""
+        if not self.current_metadata:
+            messagebox.showwarning("Move Image", "No image is selected.")
+            return
+
+        destination = filedialog.askdirectory(title="Move Image To Folder")
+        if not destination:
+            return
+
+        self._run_file_request("move", self.current_metadata.file_path, destination_folder=destination)
+
+    def _confirm_delete_current_image(self):
+        """Show a non-blocking delete confirmation dialog."""
+        if not self.current_metadata:
+            messagebox.showwarning("Delete Image", "No image is selected.")
+            return
+
+        if self._delete_dialog and self._delete_dialog.winfo_exists():
+            self._delete_dialog.destroy()
+
+        dialog = tk.Toplevel(self)
+        dialog.title("Delete Image")
+        dialog.transient(self.winfo_toplevel())
+        dialog.resizable(False, False)
+        dialog.geometry("+%d+%d" % (self.winfo_rootx() + 140, self.winfo_rooty() + 180))
+
+        tk.Label(
+            dialog,
+            text=f"Delete {self.current_metadata.filename}?\nThis removes the file and its database entry.",
+            justify=tk.LEFT,
+            padx=18,
+            pady=16,
+        ).pack(fill="both", expand=True)
+
+        button_row = tk.Frame(dialog)
+        button_row.pack(fill="x", padx=12, pady=(0, 12))
+        tk.Button(button_row, text="Cancel", command=dialog.destroy).pack(side=tk.RIGHT, padx=(8, 0))
+        tk.Button(
+            button_row,
+            text="Delete",
+            bg="#c0392b",
+            fg="white",
+            command=lambda: self._execute_delete_current_image(dialog),
+        ).pack(side=tk.RIGHT)
+
+        self._delete_dialog = dialog
+
+    def _execute_delete_current_image(self, dialog):
+        dialog.destroy()
+        if self.current_metadata:
+            self._run_file_request("delete", self.current_metadata.file_path)
+
+    def _run_file_request(self, action: str, image_path: str, **kwargs):
+        """Dispatch a file operation request through the application controller."""
+        if not self.on_file_request:
+            messagebox.showerror("File Operation Error", "File management is not configured.")
+            return
+
+        result = self.on_file_request(action, image_path, **kwargs)
+        if not result.get("success"):
+            messagebox.showerror("File Operation Error", result.get("error", "File operation failed."))
     
     def _revert_changes(self):
         """Revert all changes to original values."""
